@@ -1,0 +1,250 @@
+[
+  {
+    "ship_id": "SHP-001",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:44.491387"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:38.966547"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:38.966547"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:44.491387"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-002",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:47.608299"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:42.083459"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:42.083459"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:47.608299"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-003",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:49.500174"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:43.975334"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:43.975334"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:49.500174"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-004",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:50.505295"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:44.980455"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:44.980455"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:50.505295"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-005",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:51.096540"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:45.571700"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:45.571700"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:51.096540"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-006",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:51.293760"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:45.768920"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:45.768920"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:51.293760"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-007",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:51.551983"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:46.027143"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:46.027143"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:51.551983"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  },
+  {
+    "ship_id": "SHP-008",
+    "operator": "Unassigned",
+    "cargo_type": "General cargo",
+    "weight_tonnes": 1000.0,
+    "load_teu": 500,
+    "loa_m": 180.0,
+    "draft_m": 9.0,
+    "unload_hours": 8.0,
+    "start_dt": {
+      "__datetime__": "2026-08-14T12:01:51.813791"
+    },
+    "expected_end": {
+      "__datetime__": "2026-08-15T12:25:46.288951"
+    },
+    "spoilable": false,
+    "spoilage_deadline": null,
+    "latitude": 15.0,
+    "longitude": 85.0,
+    "speed_knots": 12.0,
+    "distance_km": 364.4394933219073,
+    "travel_hours": 16.398465322260048,
+    "eta": {
+      "__datetime__": "2026-08-15T04:25:46.288951"
+    },
+    "updated_at": {
+      "__datetime__": "2026-08-14T10:49:51.813791"
+    },
+    "departure_prep_hours": 1.2,
+    "reference_port": "Kakinada Deep Water Port"
+  }
+]

@@ -1,0 +1,91 @@
+/* @import url() FONT IMPORTS MUST ALWAYS BE AT THE VERY TOP OF THIS FILE, ABOVE THE TAILWIND IMPORTS — DO NOT DELETE THIS COMMENT */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* CRITICAL: THE FOLLOWING TAILWIND IMPORTS MUST NEVER BE DELETED OR REORDERED — DO NOT DELETE THIS COMMENT */
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+/* END TAILWIND IMPORTS — ALL OTHER CSS MUST GO BELOW THIS LINE */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background-color: #04070e;
+  color: #e8eff9;
+  font-family: Inter, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+/* Fine navigational grid used behind operational surfaces */
+.np-grid {
+  background-image: linear-gradient(rgba(40, 57, 90, 0.28) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(40, 57, 90, 0.28) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+.np-grid-fine {
+  background-image: linear-gradient(rgba(40, 57, 90, 0.22) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(40, 57, 90, 0.22) 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+.np-panel {
+  background-color: rgba(15, 24, 41, 0.72);
+  border: 1px solid rgba(26, 39, 64, 0.9);
+  backdrop-filter: blur(10px);
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #070d18;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e2d49;
+  border-radius: 999px;
+  border: 2px solid #070d18;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #2a3d61;
+}
+:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: 2px;
+}
+@keyframes np-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(1.6);
+  }
+}
+.np-ping {
+  animation: np-pulse 2.4s cubic-bezier(0.23, 1, 0.32, 1) infinite;
+}
+@keyframes np-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.np-sweep::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(34, 211, 238, 0.14), transparent);
+  animation: np-sweep 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .np-ping,
+  .np-sweep::after {
+    animation: none;
+  }
+}
