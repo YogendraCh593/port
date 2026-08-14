@@ -1,24 +1,23 @@
 /**
- * useSimulation – drives the ship animation loop.
+ * useSimulation – rAF-driven ship animation engine.
  *
- * Time scaling: 1 real hour = 5 real seconds at speed=1×
- *   → SIM_SCALE = 3600 / 5 = 720 sim-seconds per real-second
+ * Time scaling: 1 real hour = 5 real seconds at speed 1×
+ *   → SIM_SCALE = 720  (sim-seconds per real-second)
  *
- * The hook owns:
- *  • simTime  – the current simulation clock (Date)
- *  • shipPositions – interpolated lat/lon for every vessel (no API call)
- *  • playing / speed controls
- *
- * Ships move smoothly via requestAnimationFrame. Each vessel travels from
- * its registered lat/lon toward the port in a straight geodesic line at its
- * registered speed (converted to deg/sim-second).
+ * FIX LOG
+ * ───────
+ * • speed stored in a ref so tick() never gets recreated (was causing rAF
+ *   to restart every speed change and never accumulate movement)
+ * • simTime initialised to (departure - 10 min) so ships are always seen
+ *   moving from the start
+ * • Servicing berth position is deterministic (no Math.random jitter)
+ * • tick() closure is stable — only recreated when vessels/port change
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BASE_URL } from '../services/api';
 
-// 1 real hour = 5 real seconds at speed=1  →  720 sim-sec / real-sec
-export const SIM_SCALE = 720;
+export const SIM_SCALE = 720; // 1 real hr = 5 real seconds at 1×
 
 export interface ShipPosition {
   ship_id: string;
@@ -37,184 +36,215 @@ export interface ShipPosition {
   halted: boolean;
   halt_hours: number;
   halt_reason: string;
-  /** 0–1 progress along the approach track */
-  progress: number;
+  progress: number; // 0–1 along approach track
 }
 
-interface UseSimulationOptions {
-  portLat: number;
-  portLon: number;
-  /** external vessels from PortContext */
-  vessels: {
-    id: string;
-    lat: number;
-    lon: number;
-    speedKnots: number;
-    departure: string;
-    unloadingHours: number;
-    cargoType: string;
-    loadTonnes: number;
-    operator: string;
-    loa: number;
-    draft: number;
-    teu: number;
-  }[];
+export interface SimVessel {
+  id: string;
+  lat: number;
+  lon: number;
+  speedKnots: number;
+  departure: string;
+  unloadingHours: number;
+  cargoType: string;
+  loadTonnes: number;
+  operator: string;
+  loa: number;
+  draft: number;
+  teu: number;
 }
 
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
+// ── Helpers ─────────────────────────────────────────────────────────────────
+function haversineKm(la1: number, lo1: number, la2: number, lo2: number) {
   const R = 6371.0088;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const dLat = ((la2 - la1) * Math.PI) / 180;
+  const dLon = ((lo2 - lo1) * Math.PI) / 180;
   const a =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
+    Math.cos((la1 * Math.PI) / 180) *
+      Math.cos((la2 * Math.PI) / 180) *
       Math.sin(dLon / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-function hsvToHex(h: number, s: number, v: number): string {
+function hsvToHex(h: number, s: number, v: number) {
   const f = (n: number) => {
     const k = (n + h / 60) % 6;
     return v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
   };
-  const r = Math.round(f(5) * 255).toString(16).padStart(2, '0');
-  const g = Math.round(f(3) * 255).toString(16).padStart(2, '0');
-  const b = Math.round(f(1) * 255).toString(16).padStart(2, '0');
-  return `#${r}${g}${b}`;
+  return (
+    '#' +
+    [f(5), f(3), f(1)]
+      .map((c) => Math.round(c * 255).toString(16).padStart(2, '0'))
+      .join('')
+  );
 }
 
 export function shipColor(idx: number) {
   return hsvToHex((idx * 137.508) % 360, 0.72, 0.95);
 }
 
-// Anchorage holding positions just offshore (indexed fan)
-function anchoragePos(portLat: number, portLon: number, idx: number) {
-  const bearingRad = Math.PI / 2; // due east = sea side
+/** Deterministic anchorage offset so ships don't jitter at anchorage */
+function anchoragePos(pLat: number, pLon: number, idx: number) {
   const ring = 0.018 + 0.006 * (idx % 4);
   const along = (idx - 1.5) * 0.009;
-  const lat = portLat + ring * Math.cos(bearingRad) + along * Math.sin(bearingRad);
-  const lon =
-    portLon +
-    (ring * Math.sin(bearingRad) + along * Math.cos(bearingRad)) /
-      Math.cos((portLat * Math.PI) / 180);
+  // offset due-east (sea side) of the port
+  const lat = pLat + along * 0.0001;
+  const lon = pLon + ring / Math.cos((pLat * Math.PI) / 180);
   return { lat, lon };
 }
 
-export function useSimulation({ portLat, portLon, vessels }: UseSimulationOptions) {
-  const [simTime, setSimTime] = useState<Date>(() => new Date());
+/** Deterministic berth-side position so servicing ships don't jitter */
+function berthPos(pLat: number, pLon: number, idx: number) {
+  const offset = 0.003 + idx * 0.0015;
+  return {
+    lat: pLat + (idx % 2 === 0 ? offset : -offset * 0.3),
+    lon: pLon + offset * 0.5,
+  };
+}
+
+// ── Hook ────────────────────────────────────────────────────────────────────
+export function useSimulation({
+  portLat,
+  portLon,
+  vessels,
+}: {
+  portLat: number;
+  portLon: number;
+  vessels: SimVessel[];
+}) {
+  // ── Find earliest departure so simulation starts just before ships move ──
+  function getInitialTime(vs: SimVessel[]): Date {
+    if (vs.length === 0) return new Date();
+    const earliest = Math.min(...vs.map((v) => new Date(v.departure).getTime()));
+    return new Date(earliest - 10 * 60 * 1000);
+  }
+
+  const [simTime, setSimTime] = useState<Date>(() => getInitialTime(vessels));
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeedState] = useState(1);
   const [positions, setPositions] = useState<ShipPosition[]>([]);
-  // halt map: ship_id → extra hours added
   const [halts, setHalts] = useState<Record<string, { hours: number; reason: string }>>({});
 
-  const rafRef = useRef<number | null>(null);
-  const lastRealRef = useRef<number>(performance.now());
-  const simTimeRef = useRef<Date>(simTime);
+  // ── Refs for the animation loop (avoids stale closures) ──────────────────
+  const rafRef     = useRef<number | null>(null);
+  const lastRef    = useRef<number>(performance.now());
+  const simRef     = useRef<Date>(simTime);
+  const speedRef   = useRef<number>(speed);
+  const haltsRef   = useRef(halts);
+  const vesselsRef = useRef(vessels);
 
-  // Keep ref in sync
-  useEffect(() => { simTimeRef.current = simTime; }, [simTime]);
+  // Keep refs in sync with state
+  useEffect(() => { speedRef.current   = speed;   }, [speed]);
+  useEffect(() => { haltsRef.current   = halts;   }, [halts]);
+  useEffect(() => { vesselsRef.current = vessels; }, [vessels]);
 
-  // ── Interpolate all ship positions at a given simTime ──────────────────
-  const interpolate = useCallback(
-    (t: Date): ShipPosition[] => {
-      let anchorageIdx = 0;
-      return vessels.map((v, idx) => {
-        const color = shipColor(idx);
-        const departure = new Date(v.departure);
-        const distanceKm = haversineKm(v.lat, v.lon, portLat, portLon);
-        const speedKmh = Math.max(v.speedKnots, 0.1) * 1.852;
-        const travelHours = distanceKm / speedKmh;
+  // ── Reset sim time when vessels change (new ship registered) ─────────────
+  useEffect(() => {
+    if (vessels.length === 0) return;
+    const earliest = Math.min(...vessels.map((v) => new Date(v.departure).getTime()));
+    const t = new Date(earliest - 10 * 60 * 1000);
+    simRef.current = t;
+    setSimTime(t);
+  }, [vessels.length]); // only when count changes, not every re-render
 
-        // Apply halt extension
-        const haltExtra = halts[v.id]?.hours ?? 0;
-        const etaMs = departure.getTime() + (travelHours + haltExtra) * 3_600_000;
-        const etaDate = new Date(etaMs);
-        const unloadEnd = new Date(etaMs + v.unloadingHours * 3_600_000);
+  // ── Position interpolator ─────────────────────────────────────────────────
+  function interpolate(t: Date, vs: SimVessel[], h: typeof halts): ShipPosition[] {
+    const tMs = t.getTime();
+    let anchorageIdx = 0;
 
-        const tMs = t.getTime();
+    return vs.map((v, idx) => {
+      const color     = shipColor(idx);
+      const depMs     = new Date(v.departure).getTime();
+      const distKm    = haversineKm(v.lat, v.lon, portLat, portLon);
+      const speedKmh  = Math.max(v.speedKnots, 0.1) * 1.852;
+      const travelMs  = (distKm / speedKmh) * 3_600_000;
+      const haltExtra = (h[v.id]?.hours ?? 0) * 3_600_000;
+      const etaMs     = depMs + travelMs + haltExtra;
+      const endMs     = etaMs + v.unloadingHours * 3_600_000;
 
-        let lat: number, lon: number, status: ShipPosition['status'], progress: number;
+      let lat: number, lon: number;
+      let status: ShipPosition['status'];
+      let progress: number;
 
-        if (tMs < departure.getTime()) {
-          // Not yet departed — sit at origin
-          lat = v.lat;
-          lon = v.lon;
-          status = 'Approaching';
-          progress = 0;
-        } else if (tMs < etaDate.getTime()) {
-          // On approach — linear interpolation along great-circle track
-          const elapsed = tMs - departure.getTime();
-          const total = etaDate.getTime() - departure.getTime();
-          const ratio = Math.min(1, elapsed / Math.max(total, 1));
-          progress = ratio;
-          lat = v.lat + (portLat - v.lat) * ratio;
-          lon = v.lon + (portLon - v.lon) * ratio;
-          status = halts[v.id] ? 'Waiting at Anchorage' : 'Approaching';
-        } else if (tMs < unloadEnd.getTime()) {
-          // At berth — sit at anchorage holding point while waiting, then berth
-          const waited = (tMs - etaDate.getTime()) / 3_600_000;
-          if (waited < 0.5) {
-            // Just arrived — show at anchorage briefly
-            const { lat: aLat, lon: aLon } = anchoragePos(portLat, portLon, anchorageIdx++);
-            lat = aLat;
-            lon = aLon;
-            status = 'Waiting at Anchorage';
-          } else {
-            lat = portLat + (Math.random() - 0.5) * 0.002;
-            lon = portLon + (Math.random() - 0.5) * 0.002;
-            status = 'Servicing';
-          }
-          progress = 1;
+      if (tMs <= depMs) {
+        // ── Not yet departed ── ship sits at its registered position
+        lat = v.lat; lon = v.lon;
+        status   = 'Approaching';
+        progress = 0;
+
+      } else if (tMs < etaMs) {
+        // ── On approach ── smooth linear interpolation toward port ──
+        const ratio = Math.min(1, (tMs - depMs) / Math.max(travelMs, 1));
+        progress = ratio;
+        lat = v.lat + (portLat - v.lat) * ratio;
+        lon = v.lon + (portLon - v.lon) * ratio;
+        status = h[v.id] ? 'Waiting at Anchorage' : 'Approaching';
+
+      } else if (tMs < endMs) {
+        // ── Arrived ── show at anchorage briefly, then at berth ──
+        const dwellMs = tMs - etaMs;
+        if (dwellMs < 2 * 60 * 1000) { // first 2 sim-minutes → anchorage
+          const ap = anchoragePos(portLat, portLon, anchorageIdx++);
+          lat = ap.lat; lon = ap.lon;
+          status = 'Waiting at Anchorage';
         } else {
-          // Departed
-          lat = portLat + 0.04 + idx * 0.005;
-          lon = portLon + 0.04 + idx * 0.003;
-          status = 'Departed';
-          progress = 1;
+          const bp = berthPos(portLat, portLon, idx);
+          lat = bp.lat; lon = bp.lon;
+          status = 'Servicing';
         }
+        progress = 1;
 
-        return {
-          ship_id: v.id,
-          lat, lon, status, progress, color, index: idx,
-          speed_knots: v.speedKnots,
-          eta: etaDate.toISOString(),
-          cargo_type: v.cargoType,
-          weight_tonnes: v.loadTonnes,
-          operator: v.operator,
-          loa_m: v.loa,
-          draft_m: v.draft,
-          halted: !!halts[v.id],
-          halt_hours: halts[v.id]?.hours ?? 0,
-          halt_reason: halts[v.id]?.reason ?? '',
-        };
-      });
-    },
-    [vessels, portLat, portLon, halts],
-  );
+      } else {
+        // ── Departed ── move slightly away from port ──
+        const dp = berthPos(portLat, portLon, idx);
+        lat = dp.lat + 0.04;
+        lon = dp.lon + 0.04;
+        status   = 'Departed';
+        progress = 1;
+      }
 
-  // ── rAF animation loop ─────────────────────────────────────────────────
+      return {
+        ship_id: v.id, lat, lon, status, progress, color, index: idx,
+        speed_knots: v.speedKnots,
+        eta: new Date(etaMs).toISOString(),
+        cargo_type: v.cargoType,
+        weight_tonnes: v.loadTonnes,
+        operator: v.operator,
+        loa_m: v.loa, draft_m: v.draft,
+        halted: !!h[v.id],
+        halt_hours:  h[v.id]?.hours  ?? 0,
+        halt_reason: h[v.id]?.reason ?? '',
+      };
+    });
+  }
+
+  // ── Stable rAF tick — never recreated ─────────────────────────────────────
   const tick = useCallback(() => {
-    const now = performance.now();
-    const realDeltaMs = now - lastRealRef.current;
-    lastRealRef.current = now;
+    const now       = performance.now();
+    const realDelta = now - lastRef.current;
+    lastRef.current = now;
 
-    // Advance sim clock: 1 real-ms → SIM_SCALE * speed sim-ms
-    const simDeltaMs = realDeltaMs * SIM_SCALE * speed;
-    const nextSim = new Date(simTimeRef.current.getTime() + simDeltaMs);
-    simTimeRef.current = nextSim;
-    setSimTime(nextSim);
-    setPositions(interpolate(nextSim));
+    // Advance sim clock by (realDelta × SIM_SCALE × speed)
+    const simDelta = realDelta * SIM_SCALE * speedRef.current;
+    const nextSim  = new Date(simRef.current.getTime() + simDelta);
+    simRef.current = nextSim;
+
+    // Batch both state updates together
+    const newPos = interpolate(nextSim, vesselsRef.current, haltsRef.current);
+    setSimTime(new Date(nextSim));
+    setPositions(newPos);
 
     rafRef.current = requestAnimationFrame(tick);
-  }, [interpolate, speed]);
+  // tick is intentionally stable — it reads everything via refs
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portLat, portLon]);
 
-  // Start / stop rAF based on playing state
+  // ── Start / stop rAF ──────────────────────────────────────────────────────
   useEffect(() => {
     if (playing) {
-      lastRealRef.current = performance.now();
-      rafRef.current = requestAnimationFrame(tick);
+      lastRef.current = performance.now();
+      rafRef.current  = requestAnimationFrame(tick);
     } else {
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
@@ -226,13 +256,17 @@ export function useSimulation({ portLat, portLon, vessels }: UseSimulationOption
     };
   }, [playing, tick]);
 
-  // Re-interpolate immediately when not playing (e.g. after halt)
+  // ── Re-render when paused (halt / vessel change) ──────────────────────────
   useEffect(() => {
-    if (!playing) setPositions(interpolate(simTimeRef.current));
-  }, [halts, vessels, interpolate, playing]);
+    if (!playing) {
+      setPositions(interpolate(simRef.current, vessels, halts));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [halts, vessels, playing]);
 
+  // ── Controls ──────────────────────────────────────────────────────────────
   const play = useCallback(() => {
-    lastRealRef.current = performance.now();
+    lastRef.current = performance.now();
     setPlaying(true);
   }, []);
 
@@ -240,44 +274,42 @@ export function useSimulation({ portLat, portLon, vessels }: UseSimulationOption
 
   const reset = useCallback(() => {
     setPlaying(false);
-    const t = new Date();
-    simTimeRef.current = t;
+    // Go back to just before the first departure
+    const vs = vesselsRef.current;
+    const t =
+      vs.length > 0
+        ? new Date(Math.min(...vs.map((v) => new Date(v.departure).getTime())) - 10 * 60 * 1000)
+        : new Date();
+    simRef.current = t;
     setSimTime(t);
-    setPositions(interpolate(t));
-  }, [interpolate]);
+    setPositions(interpolate(t, vs, haltsRef.current));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [portLat, portLon]);
 
   const setSpeed = useCallback((s: number) => {
+    speedRef.current = s;
     setSpeedState(s);
   }, []);
 
-  // ── Emergency halt ─────────────────────────────────────────────────────
-  const applyHalt = useCallback(
-    async (shipId: string, haltHours: number, reason: string) => {
-      // Optimistically update local state immediately
-      setHalts((prev) => ({
-        ...prev,
-        [shipId]: { hours: (prev[shipId]?.hours ?? 0) + haltHours, reason },
-      }));
-      // Also notify the backend
-      try {
-        await fetch(`${BASE_URL}/vessels/${encodeURIComponent(shipId)}/emergency-halt`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ship_id: shipId, halt_hours: haltHours, reason }),
-        });
-      } catch (e) {
-        console.warn('Backend halt sync failed (local state still applied):', e);
-      }
-    },
-    [],
-  );
+  // ── Emergency halt ────────────────────────────────────────────────────────
+  const applyHalt = useCallback(async (shipId: string, haltHours: number, reason: string) => {
+    setHalts((prev) => ({
+      ...prev,
+      [shipId]: { hours: (prev[shipId]?.hours ?? 0) + haltHours, reason },
+    }));
+    try {
+      await fetch(`${BASE_URL}/vessels/${encodeURIComponent(shipId)}/emergency-halt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ship_id: shipId, halt_hours: haltHours, reason }),
+      });
+    } catch (e) {
+      console.warn('Backend halt sync failed:', e);
+    }
+  }, []);
 
   const clearHalt = useCallback(async (shipId: string) => {
-    setHalts((prev) => {
-      const next = { ...prev };
-      delete next[shipId];
-      return next;
-    });
+    setHalts((prev) => { const n = { ...prev }; delete n[shipId]; return n; });
     try {
       await fetch(`${BASE_URL}/vessels/${encodeURIComponent(shipId)}/emergency-halt`, {
         method: 'DELETE',
@@ -287,17 +319,5 @@ export function useSimulation({ portLat, portLon, vessels }: UseSimulationOption
     }
   }, []);
 
-  return {
-    simTime,
-    playing,
-    speed,
-    positions,
-    halts,
-    play,
-    pause,
-    reset,
-    setSpeed,
-    applyHalt,
-    clearHalt,
-  };
+  return { simTime, playing, speed, positions, halts, play, pause, reset, setSpeed, applyHalt, clearHalt };
 }
