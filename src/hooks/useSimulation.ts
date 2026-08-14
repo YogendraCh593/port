@@ -196,10 +196,15 @@ export function useSimulation({
         progress = 1;
 
       } else {
-        // ── Departed ── move slightly away from port ──
-        const dp = berthPos(portLat, portLon, idx);
-        lat = dp.lat + 0.04;
-        lon = dp.lon + 0.04;
+        // ── Departed ── ship sails away from port at its registered speed ──
+        // It moves in the opposite direction (back toward its origin lat/lon)
+        const departedMs   = tMs - endMs;
+        const departedHours = departedMs / 3_600_000;
+        const departDist   = (Math.max(v.speedKnots, 0.1) * 1.852 * departedHours);
+        // Fraction of original distance covered in departure direction
+        const departRatio  = Math.min(departDist / Math.max(distKm, 1), 1);
+        lat = portLat + (v.lat - portLat) * departRatio * 0.45;
+        lon = portLon + (v.lon - portLon) * departRatio * 0.45;
         status   = 'Departed';
         progress = 1;
       }
