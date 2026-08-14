@@ -34,7 +34,10 @@ import { cn, inputClass } from '../utils/ui';
 const SPEEDS = [1, 10, 30, 100, 720];
 
 export function PortSimulation() {
-  const { vessels, port, mapSnapshot, runOptimization, solving, kpis } = usePort();
+  const { vessels, port, mapSnapshot, runOptimization, solving, kpis, activePort } = usePort();
+
+  // Number of berths from active port
+  const numBerths = activePort?.berths ?? 5;
 
   // Vessel input for the simulation hook
   const simVessels = useMemo(() => vessels.map((v) => ({
@@ -51,9 +54,9 @@ export function PortSimulation() {
   })), [vessels]);
 
   const {
-    simTime, playing, speed, positions, halts,
+    simTime, playing, speed, positions, berthState, halts,
     play, pause, reset, setSpeed, applyHalt, clearHalt,
-  } = useSimulation({ portLat: port.lat, portLon: port.lon, vessels: simVessels });
+  } = useSimulation({ portLat: port.lat, portLon: port.lon, vessels: simVessels, numBerths });
 
   // Build berth → ship map for route lines
   const berthShipMap = useMemo(() => {
@@ -184,7 +187,12 @@ export function PortSimulation() {
           </div>
 
           <div style={{ position: 'relative', height: 540 }}>
-            <PortMap animatedPositions={positions} berthShipMap={berthShipMap} />
+            <PortMap
+              animatedPositions={positions}
+              berthState={berthState}
+              numBerths={numBerths}
+              berthShipMap={berthShipMap}
+            />
           </div>
         </Panel>
 
@@ -247,28 +255,28 @@ export function PortSimulation() {
             </Panel>
           )}
 
-          {/* Berth status from snapshot */}
+          {/* Live berth status — driven by berthState every frame */}
           <Panel eyebrow="Live" title="Berth Status" bodyClassName="p-0">
-            <ul className="max-h-48 divide-y divide-line/70 overflow-y-auto">
-              {(mapSnapshot?.berths ?? []).slice(0, 10).map((b) => (
-                <li key={b.name} className="flex items-center gap-3 px-4 py-2">
-                  <span className={cn('h-2 w-2 shrink-0 rounded-full',
-                    b.occupied ? 'bg-crit' : 'bg-ok')} />
-                  <span className="min-w-0 flex-1 font-mono text-[11px] text-chalk">{b.name}</span>
-                  <span className="font-mono text-[9px] text-mist">
-                    {(b.capacity_tonnes / 1000).toFixed(0)}k t
+            <ul className="max-h-52 divide-y divide-line/70 overflow-y-auto">
+              {berthState.length === 0 && (
+                <li className="px-4 py-6 text-center font-mono text-[11px] text-mist">
+                  Register vessels and press Play.
+                </li>
+              )}
+              {berthState.map((b) => (
+                <li key={b.slot} className="flex items-center gap-3 px-4 py-2">
+                  <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${b.occupied ? 'bg-crit' : 'bg-ok'}`} />
+                  <span className="min-w-0 flex-1 font-mono text-[11px] text-chalk">
+                    Berth {b.slot + 1}
                   </span>
-                  <span className={cn('font-mono text-[10px]',
-                    b.occupied ? 'text-crit' : 'text-ok')}>
+                  {b.shipId && (
+                    <span className="font-mono text-[10px] text-warn">{b.shipId}</span>
+                  )}
+                  <span className={`font-mono text-[10px] ${b.occupied ? 'text-crit' : 'text-ok'}`}>
                     {b.occupied ? 'BUSY' : 'FREE'}
                   </span>
                 </li>
               ))}
-              {(mapSnapshot?.berths ?? []).length === 0 && (
-                <li className="px-4 py-6 text-center font-mono text-[11px] text-mist">
-                  Run optimization to see berth assignments.
-                </li>
-              )}
             </ul>
           </Panel>
         </div>

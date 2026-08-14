@@ -11,10 +11,10 @@ import { useSimulation } from '../hooks/useSimulation';
 import { fmtNumber } from '../utils/geo';
 
 export function LiveFleet() {
-  const { vessels, derived, port } = usePort();
+  const { vessels, derived, port, activePort } = usePort();
   const k = useKpis();
+  const numBerths = activePort?.berths ?? 5;
 
-  // Use the same simulation engine so the map shows live animated positions
   const simVessels = vessels.map((v) => ({
     id: v.id, lat: v.lat, lon: v.lon,
     speedKnots: v.speedKnots, departure: v.departure,
@@ -23,8 +23,8 @@ export function LiveFleet() {
     loa: v.loa, draft: v.draft, teu: v.teu,
   }));
 
-  const { positions, playing, play, pause } = useSimulation({
-    portLat: port.lat, portLon: port.lon, vessels: simVessels,
+  const { positions, berthState, playing, play, pause } = useSimulation({
+    portLat: port.lat, portLon: port.lon, vessels: simVessels, numBerths,
   });
 
   const farthest = vessels
@@ -64,7 +64,7 @@ export function LiveFleet() {
           bodyClassName="p-0">
           
           <div className="h-[400px] sm:h-[500px]">
-            <PortMap animatedPositions={positions} />
+            <PortMap animatedPositions={positions} berthState={berthState} numBerths={numBerths} />
           </div>
         </Panel>
         <VesselDetailPanel />
