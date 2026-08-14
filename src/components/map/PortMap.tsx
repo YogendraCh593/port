@@ -25,16 +25,63 @@ L.Icon.Default.mergeOptions({
 });
 
 // ── Icon builders ───────────────────────────────────────────────────────────
+
+/**
+ * Berth marker — prominent coloured pin so berths are always visible.
+ *   GREEN  = berth is free and ready
+ *   RED    = berth is occupied / scheduled
+ */
 function berthIcon(name: string, capacity: number, occupied: boolean): L.DivIcon {
-  const bg = occupied ? '#ef4444' : '#22c55e';
+  const bg         = occupied ? '#ef4444' : '#22c55e';
+  const glow       = occupied
+    ? '0 0 14px 4px rgba(239,68,68,0.55)'
+    : '0 0 14px 4px rgba(34,197,94,0.55)';
+  const statusText = occupied ? 'BUSY' : 'FREE';
+  const statusClr  = occupied ? '#fca5a5' : '#bbf7d0';
+
   return L.divIcon({
     className: '',
-    iconAnchor: [36, 11],
-    html: `<div style="background:${bg};color:#06101c;border:2px solid #fff;
-      border-radius:7px;padding:4px 7px;font-weight:800;font-size:10px;
-      white-space:nowrap;box-shadow:0 2px 7px rgba(0,0,0,.45);
-      font-family:monospace;">${name}<br/>
-      <span style="font-size:9px;">${(capacity / 1000).toFixed(0)}k t</span></div>`,
+    // anchor: centre-bottom of the pin tip
+    iconAnchor: [22, 54],
+    html: `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:0;">
+        <!-- Label chip -->
+        <div style="
+          background:${bg};
+          color:#06101c;
+          border:2px solid #fff;
+          border-radius:8px;
+          padding:3px 8px 2px;
+          font-weight:900;
+          font-size:10px;
+          white-space:nowrap;
+          box-shadow:${glow},0 2px 8px rgba(0,0,0,0.5);
+          font-family:monospace;
+          line-height:1.3;
+          text-align:center;
+        ">
+          ${name}<br/>
+          <span style="font-size:8px;color:${statusClr};">
+            ${statusText} · ${(capacity / 1000).toFixed(0)}k t
+          </span>
+        </div>
+        <!-- Pin stem -->
+        <div style="
+          width:3px;
+          height:12px;
+          background:${bg};
+          box-shadow:${glow};
+        "></div>
+        <!-- Pin dot -->
+        <div style="
+          width:10px;
+          height:10px;
+          border-radius:50%;
+          background:${bg};
+          border:2px solid #fff;
+          box-shadow:${glow};
+        "></div>
+      </div>`,
   });
 }
 
@@ -278,16 +325,33 @@ export function PortMap({ className, animatedPositions, berthShipMap = {} }: Por
                   icon={berthIcon(b.name, b.capacity_tonnes, b.occupied)}
                 >
                   <Popup>
-                    <b>{b.name}</b><br />
-                    <span style={{ color: '#666' }}>Capacity: </span>{b.capacity_tonnes.toLocaleString()} t<br />
-                    <span style={{ color: '#666' }}>Max LOA: </span>{b.max_loa_m} m &nbsp;
-                    <span style={{ color: '#666' }}>Draft: </span>{b.max_draft_m} m<br />
-                    <b style={{ color: b.occupied ? '#ef4444' : '#22c55e' }}>
-                      {b.occupied ? '⬤ OCCUPIED' : '⬤ AVAILABLE'}
-                    </b>
-                    {b.assigned_ships.length > 0 && (
-                      <><br /><span style={{ color: '#666' }}>Ships: </span>{b.assigned_ships.join(', ')}</>
-                    )}
+                    <div style={{ fontFamily: 'monospace', fontSize: 12, minWidth: 230 }}>
+                      <div style={{
+                        background: b.occupied ? '#7f1d1d' : '#14532d',
+                        color: b.occupied ? '#fca5a5' : '#bbf7d0',
+                        border: `1px solid ${b.occupied ? '#ef4444' : '#22c55e'}`,
+                        borderRadius: 6, padding: '4px 10px',
+                        marginBottom: 8, fontWeight: 900,
+                        fontSize: 13, textAlign: 'center',
+                        letterSpacing: '0.08em',
+                      }}>
+                        {b.occupied ? '🔴  OCCUPIED' : '🟢  AVAILABLE'}
+                      </div>
+                      <b style={{ fontSize: 14 }}>{b.name}</b><br />
+                      <span style={{ color: '#888' }}>Capacity: </span>
+                      <b>{b.capacity_tonnes.toLocaleString()} t</b><br />
+                      <span style={{ color: '#888' }}>Max LOA: </span>{b.max_loa_m} m
+                      &nbsp;&nbsp;
+                      <span style={{ color: '#888' }}>Draft: </span>{b.max_draft_m} m<br />
+                      <span style={{ color: '#888' }}>Cargo: </span>
+                      {b.cargo_types.join(', ')}<br />
+                      {b.assigned_ships.length > 0 && (
+                        <>
+                          <span style={{ color: '#888' }}>Assigned: </span>
+                          <b style={{ color: '#ef4444' }}>{b.assigned_ships.join(', ')}</b>
+                        </>
+                      )}
+                    </div>
                   </Popup>
                 </Marker>
               ))}
