@@ -1488,3 +1488,38 @@ def optimize_cranes():
         "crane_count": crane_count,
         "rate_tph": cs["rate_tph"],
     }
+
+
+# ── Berth limits ─────────────────────────────────────────────────────────────
+@app.get("/berths/limits", summary="Maximum capacity, LOA and draft across all berths of the active port")
+def berth_limits():
+    """Returns the maximum values a vessel can have and still fit in at least
+    one berth. The registration console uses these as hard input limits."""
+    port = _current_port()
+    profiles = port["berth_profiles"].values()
+
+    max_capacity = max(p["capacity_tonnes"] for p in profiles)
+    max_loa      = max(p["max_loa_m"]       for p in profiles)
+    max_draft    = max(p["max_draft_m"]     for p in profiles)
+
+    # Per-berth summary so the UI can show which berth accepts what
+    berth_summary = [
+        {
+            "name":             name,
+            "capacity_tonnes":  p["capacity_tonnes"],
+            "max_loa_m":        p["max_loa_m"],
+            "max_draft_m":      p["max_draft_m"],
+            "cargo_types":      p["cargo_types"],
+            "handling_rate_tph":p["handling_rate_tph"],
+        }
+        for name, p in port["berth_profiles"].items()
+    ]
+
+    return {
+        "port":           port["short"],
+        "max_capacity_t": max_capacity,
+        "max_loa_m":      max_loa,
+        "max_draft_m":    max_draft,
+        "berth_count":    len(berth_summary),
+        "berths":         berth_summary,
+    }
