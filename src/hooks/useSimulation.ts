@@ -133,25 +133,25 @@ function anchoragePos(portLat: number, portLon: number, idx: number): [number, n
 }
 
 // ─── Cargo compatibility ──────────────────────────────────────────────────────
-const CARGO_MAP: Record<string, string> = {
-  containers: 'container', container: 'container',
-  bulk: 'dry bulk', 'dry bulk': 'dry bulk',
-  liquid: 'liquid bulk', 'liquid bulk': 'liquid bulk',
-  reefer: 'container', roro: 'general cargo',
-  general: 'general cargo', 'general cargo': 'general cargo',
-  'project cargo': 'project cargo',
-};
-
+// ALL berths accept ALL cargo types — only physical constraints apply.
+// Cargo type is purely informational for display.
 function compatible(v: SimVessel, b: BerthProfile): boolean {
   if (v.loadTonnes > b.capacity_tonnes) return false;
   if (v.loa        > b.max_loa_m)       return false;
   if (v.draft      > b.max_draft_m)     return false;
-  const cat     = CARGO_MAP[v.cargoType.toLowerCase()] ?? 'general cargo';
-  const allowed = b.cargo_types.map(c => c.toLowerCase());
-  return allowed.includes(cat) || allowed.includes('general cargo');
+  return true;  // cargo type: no restriction — any berth handles any cargo
 }
 
 // ─── Berth scheduler ──────────────────────────────────────────────────────────
+// Allocation priority:
+//   1. Ships are processed by ETA (who arrives first is served first).
+//   2. When multiple ships arrive at the same time or are waiting, the one
+//      with the HEAVIEST LOAD gets the first available berth to maximise
+//      crane utilisation.
+//   3. Among compatible berths, pick the one that can accommodate the load
+//      (highest capacity first, so we match big ships to big berths and
+//       leave small berths free for smaller ships).
+//   4. If a berth is occupied, the ship waits until it frees up.
 function scheduleBerths(
   vessels: SimVessel[],
   profiles: BerthProfile[],
@@ -167,26 +167,44 @@ function scheduleBerths(
     const travel = dist / (Math.max(v.speedKnots, 0.1) * 1.852) * 3_600_000;
     const halt   = (halts[v.id]?.hours ?? 0) * 3_600_000;
     return { v, etaMs: dep + travel + halt, unloadMs: v.unloadingHours * 3_600_000 };
-  }).sort((a, b) => a.etaMs - b.etaMs);
+  });
+
+  // Sort: ETA ascending first, then heaviest load descending as tie-break
+  infos.sort((a, b) => {
+    if (a.etaMs !== b.etaMs) return a.etaMs - b.etaMs;
+    return b.v.loadTonnes - a.v.loadTonnes;  // heavier ship gets priority
+  });
 
   const freeAt = new Array(profiles.length).fill(0);
 
   for (const { v, etaMs, unloadMs } of infos) {
-    const compatibleSlots = profiles
+    // All berths are physically checked (load, LOA, draft only — no cargo restriction)
+    const fits = profiles
       .map((bp, i) => ({ i, bp }))
       .filter(({ bp }) => compatible(v, bp));
 
-    if (!compatibleSlots.length) {
-      out.set(v.id, { vesselId: v.id, berthSlot: -1, berthName: 'No compatible berth', serviceStart: etaMs, serviceEnd: etaMs, compatible: false });
+    if (!fits.length) {
+      // No berth can physically fit this vessel
+      out.set(v.id, {
+        vesselId: v.id, berthSlot: -1,
+        berthName: `Exceeds limits (${v.loadTonnes}t / LOA ${v.loa}m / Draft ${v.draft}m)`,
+        serviceStart: etaMs, serviceEnd: etaMs, compatible: false,
+      });
       continue;
     }
 
-    // Pick compatible berth that's free earliest
-    let best = compatibleSlots[0];
-    for (const c of compatibleSlots) {
-      if (freeAt[c.i] < freeAt[best.i]) best = c;
-    }
+    // Among fitting berths, prefer the one with most capacity that is free earliest
+    // (large berth for large ship — leave small berths for smaller ships)
+    fits.sort((a, b) => {
+      // Primary: which berth is free earliest (min wait)
+      const startA = Math.max(etaMs, freeAt[a.i]);
+      const startB = Math.max(etaMs, freeAt[b.i]);
+      if (startA !== startB) return startA - startB;
+      // Tie-break: largest capacity berth for the largest ship
+      return b.bp.capacity_tonnes - a.bp.capacity_tonnes;
+    });
 
+    const best  = fits[0];
     const start = Math.max(etaMs, freeAt[best.i]);
     const end   = start + unloadMs;
     freeAt[best.i] = end;

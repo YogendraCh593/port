@@ -136,6 +136,7 @@ _CARGO_OPTIONS = [
 
 
 def _build_berth_profiles(names: List[str], default_capacity: int) -> Dict[str, Any]:
+    """All berths accept all cargo types — only load, LOA and draft are constraints."""
     profiles: Dict[str, Any] = {}
     for i, name in enumerate(names):
         profiles[name] = {
@@ -143,7 +144,8 @@ def _build_berth_profiles(names: List[str], default_capacity: int) -> Dict[str, 
             "capacity_tonnes": int(default_capacity * (0.65 + (i % 5) * 0.10)),
             "max_loa_m": int(180 + (i % 6) * 25),
             "max_draft_m": round(8.5 + (i % 5) * 1.5, 1),
-            "cargo_types": _CARGO_OPTIONS[i % len(_CARGO_OPTIONS)],
+            # All berths accept all cargo — cargo type is informational only
+            "cargo_types": ["container", "dry bulk", "liquid bulk", "project cargo", "general cargo"],
             "handling_rate_tph": int(900 + (i % 5) * 350),
         }
     return profiles
@@ -242,6 +244,7 @@ _CATEGORY_MAP = {
 
 
 def _berth_compat(ship: Dict[str, Any], berth: Dict[str, Any]) -> List[str]:
+    """Returns incompatibility reasons. Cargo type is NOT a restriction."""
     reasons: List[str] = []
     if float(ship.get("weight_tonnes", 0)) > float(berth.get("capacity_tonnes", 0)):
         reasons.append("load exceeds berth capacity")
@@ -249,11 +252,7 @@ def _berth_compat(ship: Dict[str, Any], berth: Dict[str, Any]) -> List[str]:
         reasons.append("LOA exceeds berth limit")
     if float(ship.get("draft_m", 0)) > float(berth.get("max_draft_m", 0)):
         reasons.append("draft exceeds berth limit")
-    cargo = str(ship.get("cargo_type", "General")).strip().lower()
-    cat = _CATEGORY_MAP.get(cargo, cargo)
-    allowed = [str(x).lower() for x in berth.get("cargo_types", [])]
-    if cat and cat not in allowed and "general" not in allowed:
-        reasons.append("cargo type not supported")
+    # No cargo type restriction — all berths handle all cargo
     return reasons
 
 
@@ -455,7 +454,10 @@ def _optimize(
 
     ships_sorted = sorted(
         ship_details,
-        key=lambda x: (_to_dt(x.get("eta") or x["start_dt"]), -float(x.get("weight_tonnes", 0))),
+        key=lambda x: (
+            _to_dt(x.get("eta") or x["start_dt"]),
+            -float(x.get("weight_tonnes", 0)),   # heaviest first at same ETA
+        ),
     )
 
     for ship in ships_sorted:
