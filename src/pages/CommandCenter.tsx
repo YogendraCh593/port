@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
@@ -18,6 +18,7 @@ import { ArrivalQueue } from '../components/vessel/ArrivalQueue';
 import { AlertFeed } from '../components/alerts/AlertFeed';
 import { usePort } from '../contexts/PortContext';
 import { useKpis } from '../hooks/useKpis';
+import { useSimulation } from '../hooks/useSimulation';
 import { fmtDuration, fmtNumber } from '../utils/geo';
 
 const tooltipStyle = {
@@ -32,29 +33,54 @@ const axisProps = {
 export function CommandCenter() {
   const {
     settings, optimization, solving, runOptimization, vessels,
-    kpis, refreshKpis, mapSnapshot, refreshMap, activePort,
+    kpis, refreshKpis, mapSnapshot, refreshMap, activePort, port,
   } = usePort();
   const k = useKpis();
 
-  // Refresh KPIs + map when the page is mounted
-  useEffect(() => {
-    refreshKpis();
-    refreshMap();
-  }, [refreshKpis, refreshMap]);
+  const numBerths = activePort?.berths ?? 5;
 
-  const portName = activePort?.short ?? settings.portName;
+  // Run live simulation on the dashboard map too
+  const simVessels = useMemo(() => vessels.map(v => ({
+    id: v.id, lat: v.lat, lon: v.lon,
+    speedKnots: v.speedKnots, departure: v.departure,
+    unloadingHours: v.unloadingHours, cargoType: v.cargoType,
+    loadTonnes: v.loadTonnes, operator: v.operator,
+    loa: v.loa, draft: v.draft, teu: v.teu,
+  })), [vessels]);
 
-  // Charts come from backend KPIs when available, fall back to local
+  const { positions, berthState, playing, play } = useSimulation({
+    portLat: port.lat, portLon: port.lon,
+    vessels: simVessels, numBerths,
+  });
+
+  // Auto-start the sim on the dashboard
+  useEffect(() => { if (!playing && vessels.length > 0) play(); }, [vessels.length]);
+
+  // Live counters from simulation
+  const simCounters = useMemo(() => ({
+    approaching: positions.filter(p => p.status === 'Approaching').length,
+    waiting:     positions.filter(p => p.status === 'Waiting at Anchorage').length,
+    servicing:   positions.filter(p => p.status === 'Servicing').length,
+  }), [positions]);
+
+  // Live berth utilisation from berthState (overrides backend KPI)
+  const liveBerthUtil = berthState.length > 0
+    ? Math.round(berthState.filter(b => b.occupied).length / berthState.length * 100)
+    : (kpis?.berth_utilization ?? k.berthUtilization);
+
+  // Refresh KPIs + map on mount
+  useEffect(() => { refreshKpis(); refreshMap(); }, [refreshKpis, refreshMap]);
+
+  const portName       = activePort?.short ?? settings.portName;
   const berthUtilChart = kpis?.berth_utilization_chart ?? [];
   const throughputTrend = kpis?.throughput_trend;
   const cranePie = kpis
     ? [
-        { name: 'Working', value: kpis.crane_pie.working },
-        { name: 'Idle', value: 100 - kpis.crane_pie.working - kpis.crane_pie.maintenance },
+        { name: 'Working',     value: kpis.crane_pie.working },
+        { name: 'Idle',        value: 100 - kpis.crane_pie.working - kpis.crane_pie.maintenance },
         { name: 'Maintenance', value: kpis.crane_pie.maintenance },
       ]
     : [];
-
   const comparison = kpis?.optimization_comparison;
 
   return (
@@ -94,21 +120,21 @@ export function CommandCenter() {
         />
         <KpiCard
           label="At Sea"
-          value={String(mapSnapshot?.counters.approaching ?? k.atSea)}
+          value={String(simCounters.approaching || mapSnapshot?.counters.approaching || k.atSea)}
           icon={<WavesIcon className="h-4 w-4" />}
           tone="text-aqua"
           support="On approach leg"
         />
         <KpiCard
           label="At Berth"
-          value={String(mapSnapshot?.counters.servicing ?? k.atBerth)}
+          value={String(simCounters.servicing || mapSnapshot?.counters.servicing || k.atBerth)}
           icon={<AnchorIcon className="h-4 w-4" />}
           tone="text-ok"
           support="Discharging now"
         />
         <KpiCard
           label="Waiting"
-          value={String(mapSnapshot?.counters.waiting ?? k.waiting)}
+          value={String(simCounters.waiting || mapSnapshot?.counters.waiting || k.waiting)}
           icon={<TimerIcon className="h-4 w-4" />}
           tone="text-warn"
           trend={{ dir: k.waiting > 1 ? 'up' : 'flat', text: fmtDuration(k.avgWaitingHours), good: false }}
@@ -124,11 +150,11 @@ export function CommandCenter() {
         />
         <KpiCard
           label="Berth Utilization"
-          value={`${kpis?.berth_utilization ?? k.berthUtilization}%`}
+          value={`${liveBerthUtil}%`}
           icon={<LayoutGridIcon className="h-4 w-4" />}
           tone="text-ocean"
-          trend={{ dir: 'up', text: 'plan window', good: true }}
-          support="Across operational berths"
+          trend={{ dir: 'up', text: 'live sim', good: true }}
+          support={`${berthState.filter(b => b.occupied).length}/${numBerths} berths busy`}
         />
         <KpiCard
           label="Crane Utilization"
@@ -177,7 +203,11 @@ export function CommandCenter() {
           }
         >
           <div className="h-[420px] sm:h-[520px]">
-            <PortMap />
+            <PortMap
+              animatedPositions={positions}
+              berthState={berthState}
+              numBerths={numBerths}
+            />
           </div>
         </Panel>
         <VesselDetailPanel />
@@ -191,31 +221,44 @@ export function CommandCenter() {
 
       {/* ── Charts Row 1: Berth utilization + Optimization comparison ── */}
       <div className="mt-3 grid gap-3 lg:grid-cols-2">
-        <Panel eyebrow="Berth load" title="Berth Utilization Overview">
+        <Panel eyebrow="Live berth load" title="Berth Utilization — Live">
           <div className="h-[280px]">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart
-                data={berthUtilChart}
+                data={berthState.length > 0
+                  ? berthState.map(b => ({
+                      berth: `B${b.slot + 1}`,
+                      utilization: b.occupied ? 100 : 0,
+                      status: b.occupied ? 'BUSY' : 'FREE',
+                      ship: b.shipId ?? '',
+                    }))
+                  : berthUtilChart.map(b => ({ berth: b.berth, utilization: b.utilization, status: '', ship: '' }))
+                }
                 margin={{ top: 8, right: 8, bottom: 24, left: -18 }}
               >
                 <CartesianGrid stroke="rgba(40,57,90,0.5)" vertical={false} />
-                <XAxis
-                  dataKey="berth"
-                  {...axisProps}
-                  angle={-35}
-                  textAnchor="end"
-                  interval={0}
-                />
+                <XAxis dataKey="berth" {...axisProps} angle={-35} textAnchor="end" interval={0} />
                 <YAxis {...axisProps} axisLine={false} unit="%" domain={[0, 110]} />
                 <Tooltip
                   contentStyle={tooltipStyle}
                   labelStyle={{ color: '#E8EFF9' }}
-                  formatter={(v: number) => [`${v}%`, 'Utilization']}
+                  formatter={(v: number, _n, entry: any) => [
+                    `${entry.payload.status}${entry.payload.ship ? ` · ${entry.payload.ship}` : ''}`,
+                    v === 100 ? 'OCCUPIED' : 'FREE',
+                  ]}
                 />
-                <Bar dataKey="utilization" fill="#22D3EE" radius={[3, 3, 0, 0]} maxBarSize={28} />
+                <Bar dataKey="utilization" radius={[3, 3, 0, 0]} maxBarSize={28}>
+                  {(berthState.length > 0 ? berthState : berthUtilChart).map((b: any, i: number) => (
+                    <Cell key={i} fill={b.occupied || b.utilization === 100 ? '#ef4444' : '#22c55e'} />
+                  ))}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
+          <p className="mt-2 font-mono text-[10px] text-mist">
+            🟢 GREEN = free &nbsp; 🔴 RED = ship servicing &nbsp;
+            {berthState.filter(b => b.occupied).length}/{numBerths} berths currently occupied
+          </p>
         </Panel>
 
         <Panel eyebrow="Classical vs optimized" title="Optimization Comparison">
