@@ -332,3 +332,106 @@ export const api = {
   // Health
   health: () => request<{ status: string; vessels: number; port: string }>('/health'),
 };
+
+// ── New interactive feature endpoints ──────────────────────────────────────
+
+export interface PositionValidation {
+  valid: boolean;
+  reason: string;
+  distance_km: number;
+  too_close: boolean;
+  lat: number;
+  lon: number;
+}
+
+export interface BerthCapacityCheck {
+  compatible_berths: BerthCompatResult[];
+  incompatible_berths: BerthCompatResult[];
+  any_compatible: boolean;
+  best_berth: string | null;
+}
+
+export interface BerthCompatResult {
+  berth: string;
+  compatible: boolean;
+  reasons: string[];
+  berth_capacity_t: number;
+  load_pct: number;
+  max_loa_m: number;
+  max_draft_m: number;
+  cargo_types: string[];
+}
+
+export interface EmergencyHaltResult {
+  ship_id: string;
+  new_eta: string;
+  new_expected_end: string;
+  total_halt_hours: number;
+  reason: string;
+}
+
+export interface ShipPositionEntry {
+  ship_id: string;
+  lat: number;
+  lon: number;
+  status: string;
+  halted: boolean;
+  halt_hours: number;
+  halt_reason: string;
+  speed_knots: number;
+  eta: string | null;
+  color: string;
+  index: number;
+  cargo_type: string;
+  weight_tonnes: number;
+  operator: string;
+  loa_m: number;
+  draft_m: number;
+}
+
+export interface CraneOptimizeResult {
+  assignments: CraneRow[];
+  utilization: {
+    crane: string;
+    assigned_load_t: number;
+    utilization_pct: number;
+    deviation_from_ideal_t: number;
+  }[];
+  total_load_t: number;
+  ideal_per_crane_t: number;
+  balance_score: number;
+  balanced: boolean;
+  crane_count: number;
+  rate_tph: number;
+}
+
+// Extend api object with new endpoints
+Object.assign(api, {
+  validatePosition: (lat: number, lon: number) =>
+    request<PositionValidation>(`/validate/position?lat=${lat}&lon=${lon}`),
+
+  berthCapacityCheck: (weight_tonnes: number, loa_m: number, draft_m: number, cargo_type = 'general cargo') =>
+    request<BerthCapacityCheck>(
+      `/berths/capacity-check?weight_tonnes=${weight_tonnes}&loa_m=${loa_m}&draft_m=${draft_m}&cargo_type=${encodeURIComponent(cargo_type)}`
+    ),
+
+  applyEmergencyHalt: (ship_id: string, halt_hours: number, reason: string) =>
+    request<EmergencyHaltResult>(`/vessels/${encodeURIComponent(ship_id)}/emergency-halt`, {
+      method: 'POST',
+      body: JSON.stringify({ ship_id, halt_hours, reason }),
+    }),
+
+  clearEmergencyHalt: (ship_id: string) =>
+    request<{ ship_id: string; cleared: boolean }>(
+      `/vessels/${encodeURIComponent(ship_id)}/emergency-halt`,
+      { method: 'DELETE' }
+    ),
+
+  getShipPositions: () =>
+    request<{ simulation_time: string; ships: ShipPositionEntry[]; scale_factor: number }>(
+      '/simulation/ship-positions'
+    ),
+
+  optimizeCranes: () =>
+    request<CraneOptimizeResult>('/cranes/optimize', { method: 'POST' }),
+});
