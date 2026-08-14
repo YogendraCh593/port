@@ -26,7 +26,7 @@ import { ProgressBar } from '../components/ui/ProgressBar';
 import { KpiCard } from '../components/ui/KpiCard';
 import { PortMap } from '../components/map/PortMap';
 import { usePort } from '../contexts/PortContext';
-import { useSimulation, SIM_SCALE } from '../hooks/useSimulation';
+import { useSimulation, SIM_SCALE, type ScheduleEntry } from '../hooks/useSimulation';
 import { fmtClock, fmtDate, fmtDuration, fmtNumber } from '../utils/geo';
 import { cn, inputClass } from '../utils/ui';
 
@@ -53,7 +53,7 @@ export function PortSimulation() {
   })), [vessels]);
 
   const {
-    simTime, playing, speed, positions, berthState, halts,
+    simTime, playing, speed, positions, berthState, schedule, halts,
     play, pause, reset, setSpeed, applyHalt, clearHalt,
   } = useSimulation({ portLat: port.lat, portLon: port.lon, vessels: simVessels, numBerths });
 
@@ -383,10 +383,133 @@ export function PortSimulation() {
         )}
       </Panel>
 
-      <p className="mt-3 flex items-center gap-2 font-mono text-[10px] text-mist/60">
-        <AnchorIcon className="h-3 w-3" aria-hidden />
-        Satellite: Esri World Imagery · Street: OpenStreetMap · Animation: requestAnimationFrame · Scale: {SIM_SCALE}× (1hr=5s)
-      </p>
+      {/* ── Live Berth Status + Optimized Schedule ── */}
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+
+        {/* Live berth status */}
+        <Panel eyebrow="Live — updates every frame" title="Berth Status" bodyClassName="p-0">
+          <ul className="divide-y divide-line/70">
+            {berthState.length === 0 && (
+              <li className="px-4 py-6 text-center font-mono text-[11px] text-mist">
+                Register vessels and press Play.
+              </li>
+            )}
+            {berthState.map((b) => (
+              <li key={b.slot} className="flex items-center gap-3 px-4 py-2.5">
+                <span className={`h-3 w-3 shrink-0 rounded-full shadow-md ${b.occupied ? 'bg-crit shadow-crit/40' : 'bg-ok shadow-ok/40'}`} />
+                <span className="min-w-0 flex-1 font-mono text-[12px] font-semibold text-chalk">
+                  {(b as any).berthName ?? `Berth ${b.slot + 1}`}
+                </span>
+                {b.shipId && (
+                  <span className="font-mono text-[10px] text-warn">{b.shipId}</span>
+                )}
+                <span className={`font-mono text-[11px] font-bold ${b.occupied ? 'text-crit' : 'text-ok'}`}>
+                  {b.occupied ? '🔴 BUSY' : '🟢 FREE'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+
+        {/* Crane optimization panel */}
+        <Panel eyebrow="Load balancing" title="Crane Optimization"
+          actions={
+            <Button size="sm" variant="primary" icon={<ZapIcon className="h-3 w-3" />}
+              onClick={runOptimization} disabled={solving}>
+              {solving ? 'Optimizing…' : 'Optimize Cranes'}
+            </Button>
+          }>
+          <p className="font-mono text-[11px] text-mist mb-3">
+            Run crane optimization to assign cranes to berths based on load weight, spoilage deadlines and berth capacity.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-line bg-abyss/60 px-3 py-2.5 text-center">
+              <p className="font-mono text-[9px] uppercase tracking-wider text-mist">Vessels</p>
+              <p className="font-display text-2xl font-bold text-chalk">{vessels.length}</p>
+            </div>
+            <div className="rounded-lg border border-line bg-abyss/60 px-3 py-2.5 text-center">
+              <p className="font-mono text-[9px] uppercase tracking-wider text-mist">Berths Used</p>
+              <p className="font-display text-2xl font-bold text-ok">
+                {berthState.filter(b => b.occupied).length}/{berthState.length || numBerths}
+              </p>
+            </div>
+          </div>
+        </Panel>
+      </div>
+
+      {/* ── Optimized Schedule Table ── */}
+      {schedule.length > 0 && (
+        <Panel
+          eyebrow={`${schedule.filter(s => s.compatible).length} allocated · ${schedule.filter(s => !s.compatible).length} incompatible`}
+          title="Optimized Berth Schedule"
+          className="mt-3"
+          bodyClassName="p-0"
+        >
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[700px] text-left">
+              <thead>
+                <tr className="border-b border-line/70 bg-abyss/40">
+                  {['Ship', 'Operator', 'Cargo', 'Load (t)', 'LOA (m)', 'Draft (m)', 'Assigned Berth', 'Service Start', 'Service End', 'Wait (h)', 'Status'].map(h => (
+                    <th key={h} scope="col"
+                      className="whitespace-nowrap px-3 py-2.5 font-display text-[9px] font-semibold uppercase tracking-wider2 text-mist">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {schedule.map((row) => (
+                  <tr key={row.vesselId}
+                    className="border-b border-line/50 transition-colors hover:bg-white/[0.025]">
+                    <td className="px-3 py-2.5 font-mono text-[12px] font-bold text-chalk">{row.vesselId}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-mist">{row.operator}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-mist">{row.cargoType}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-chalk">{row.weightTonnes.toLocaleString()}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-mist">{row.loa}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-mist">{row.draft}</td>
+                    <td className="px-3 py-2.5 font-mono text-[11px]">
+                      <span className={row.compatible ? 'text-aqua font-bold' : 'text-crit'}>
+                        {row.berthName}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-chalk">
+                      {row.serviceStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      <span className="block text-[9px] text-mist">
+                        {row.serviceStart.toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-[11px] text-mist">
+                      {row.serviceEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      <span className="block text-[9px] text-mist">
+                        {row.serviceEnd.toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-[11px]">
+                      <span className={row.waitHours > 1 ? 'text-warn' : 'text-ok'}>
+                        {row.waitHours.toFixed(1)}h
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={cn(
+                        'inline-flex items-center gap-1 rounded px-2 py-0.5 font-mono text-[10px] font-bold',
+                        row.compatible
+                          ? 'bg-ok/10 text-ok border border-ok/30'
+                          : 'bg-crit/10 text-crit border border-crit/30',
+                      )}>
+                        {row.compatible ? '✓ ALLOCATED' : '✗ NO BERTH'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="border-t border-line px-4 py-2 font-mono text-[10px] text-mist/70">
+            Schedule computed from actual vessel dimensions vs berth constraints (capacity · LOA · draft · cargo type).
+            Incompatible vessels show which constraint they exceed.
+          </p>
+        </Panel>
+      )}
     </>
   );
 }

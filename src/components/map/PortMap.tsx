@@ -228,7 +228,7 @@ interface PortMapProps {
   className?: string;
   animatedPositions?: ShipPosition[];
   /** Live berth occupancy from useSimulation — drives green/red in real-time */
-  berthState?: { slot: number; occupied: boolean; shipId: string | null }[];
+  berthState?: { slot: number; occupied: boolean; shipId: string | null; berthName?: string }[];
   numBerths?: number;
   berthShipMap?: Record<string, string>;
 }
@@ -296,6 +296,7 @@ export function PortMap({
         cargo_type: s.cargo_type, weight_tonnes: Number(s.weight_tonnes),
         operator: s.operator, loa_m: Number(s.loa_m), draft_m: Number(s.draft_m),
         halted: false, halt_hours: 0, halt_reason: '', progress: 0, berthSlot: -1,
+        berthName: '—',
       }));
     }
     return vessels.map((v, i) => ({
@@ -305,6 +306,7 @@ export function PortMap({
       cargo_type: v.cargoType, weight_tonnes: v.loadTonnes,
       operator: v.operator, loa_m: v.loa, draft_m: v.draft,
       halted: false, halt_hours: 0, halt_reason: '', progress: 0, berthSlot: -1,
+      berthName: '—',
     }));
   }, [animatedPositions, mapSnapshot, vessels]);
 

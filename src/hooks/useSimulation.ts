@@ -1,15 +1,18 @@
 /**
- * useSimulation – rAF-driven ship animation with proper berth allocation.
+ * useSimulation – rAF-driven ship animation with constraint-aware berth allocation.
  *
- * Berth scheduler rules
- * ─────────────────────
- * 1. Ships are sorted by ETA (earliest first).
- * 2. When a ship arrives it takes the first FREE berth.
- * 3. If no berth is free, the ship waits at the anchorage zone offshore.
- * 4. When a servicing ship departs, its berth is freed and the next
- *    waiting ship immediately moves into it.
- * 5. Berth state is recomputed every rAF tick so colour changes happen
- *    the instant a ship departs.
+ * Berth scheduler rules (v2)
+ * ──────────────────────────
+ * 1. Fetch berth profiles from /berths/limits so we know each berth's
+ *    capacity, max LOA, max draft and cargo types.
+ * 2. For each ship, compute the set of COMPATIBLE berths (respecting all
+ *    physical constraints).
+ * 3. Among compatible berths, pick the one that becomes free earliest
+ *    (FCFS). This spreads ships across ALL compatible berths — not just
+ *    the one with the highest capacity.
+ * 4. If no berth is compatible the ship waits at anchorage indefinitely
+ *    (shown with amber ring).
+ * 5. berthState[] is recomputed every rAF tick for live green/red colour.
  *
  * Time scaling: 1 real hour = 5 real seconds at speed 1× (SIM_SCALE = 720)
  */
@@ -20,7 +23,6 @@ import { BASE_URL } from '../services/api';
 export const SIM_SCALE = 720;
 
 // ── Types ────────────────────────────────────────────────────────────────────
-
 export interface ShipPosition {
   ship_id: string;
   lat: number;
@@ -39,8 +41,8 @@ export interface ShipPosition {
   halt_hours: number;
   halt_reason: string;
   progress: number;
-  /** Which berth slot (0-based) this ship is assigned to, or -1 if waiting */
-  berthSlot: number;
+  berthSlot: number;       // -1 = not at a berth
+  berthName: string;       // display name of assigned berth
 }
 
 export interface SimVessel {
@@ -58,12 +60,37 @@ export interface SimVessel {
   teu: number;
 }
 
-/** What the scheduler computed for each ship */
+export interface BerthProfile {
+  name: string;
+  capacity_tonnes: number;
+  max_loa_m: number;
+  max_draft_m: number;
+  cargo_types: string[];
+}
+
 interface BerthEvent {
   vesselId: string;
-  berthSlot: number;   // which physical berth (0-based)
-  serviceStart: number; // ms – when ship actually enters the berth
-  serviceEnd: number;   // ms – when ship departs
+  berthSlot: number;
+  berthName: string;
+  serviceStart: number;
+  serviceEnd: number;
+  compatible: boolean;  // false → no berth found, ship waits forever
+}
+
+// ── Schedule entry exposed to UI ──────────────────────────────────────────────
+export interface ScheduleEntry {
+  vesselId: string;
+  operator: string;
+  cargoType: string;
+  weightTonnes: number;
+  loa: number;
+  draft: number;
+  berthName: string;
+  berthSlot: number;
+  serviceStart: Date;
+  serviceEnd: Date;
+  waitHours: number;
+  compatible: boolean;
 }
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
@@ -91,120 +118,163 @@ function haversineKm(la1: number, lo1: number, la2: number, lo2: number): number
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-// ── Geometry helpers ──────────────────────────────────────────────────────────
+// ── Cargo category mapping (matches backend) ──────────────────────────────────
+const CARGO_CATEGORY: Record<string, string> = {
+  containers: 'container', container: 'container',
+  bulk: 'dry bulk', 'dry bulk': 'dry bulk',
+  liquid: 'liquid bulk', 'liquid bulk': 'liquid bulk',
+  reefer: 'container',
+  roro: 'general cargo', 'general cargo': 'general cargo',
+  general: 'general cargo',
+  'project cargo': 'project cargo',
+};
 
-/**
- * Place berths in a compact arc just offshore of the port.
- * Up to `totalBerths` slots, spread so each berth is clearly separate.
- */
-function berthSlotPos(
+function cargoCategory(raw: string): string {
+  return CARGO_CATEGORY[raw.toLowerCase()] ?? 'general cargo';
+}
+
+// ── Berth compatibility check ─────────────────────────────────────────────────
+function isCompatible(vessel: SimVessel, berth: BerthProfile): boolean {
+  if (vessel.loadTonnes > berth.capacity_tonnes) return false;
+  if (vessel.loa   > berth.max_loa_m)   return false;
+  if (vessel.draft > berth.max_draft_m)  return false;
+  const cat     = cargoCategory(vessel.cargoType);
+  const allowed = berth.cargo_types.map(c => c.toLowerCase());
+  if (!allowed.includes(cat) && !allowed.includes('general cargo')) return false;
+  return true;
+}
+
+// ── Geometry ──────────────────────────────────────────────────────────────────
+export function berthSlotPos(
   portLat: number, portLon: number,
   slot: number, totalBerths: number,
-): { lat: number; lon: number } {
-  // Fan berths along a 1.5 km arc due-east (sea side), 0.3 km offshore
+): [number, number] {
   const SEA_OFFSET_KM  = 0.30;
   const BERTH_SPACE_KM = 0.12;
   const EARTH_R        = 6371.0;
-
   const halfSpan = ((totalBerths - 1) / 2) * BERTH_SPACE_KM;
   const along    = slot * BERTH_SPACE_KM - halfSpan;
-
-  // East offset = offshore, north offset = along the jetty line
-  const dLat = along / EARTH_R * (180 / Math.PI);
-  const dLon = SEA_OFFSET_KM / (EARTH_R * Math.cos(portLat * Math.PI / 180)) * (180 / Math.PI);
-
-  return { lat: portLat + dLat, lon: portLon + dLon };
+  const dLat     = along / EARTH_R * (180 / Math.PI);
+  const dLon     = SEA_OFFSET_KM / (EARTH_R * Math.cos(portLat * Math.PI / 180)) * (180 / Math.PI);
+  return [portLat + dLat, portLon + dLon];
 }
 
-/**
- * Place waiting ships in a fan-shaped anchorage zone further offshore.
- * Each waiting ship gets a unique spot so they don't overlap.
- */
-function anchorageSlotPos(
-  portLat: number, portLon: number,
-  waitIdx: number,   // 0-based index among currently-waiting ships
-): { lat: number; lon: number } {
-  const ANCHOR_DIST_KM = 1.2;  // further offshore than berths
+function anchorageSlotPos(portLat: number, portLon: number, waitIdx: number): [number, number] {
+  const ANCHOR_DIST_KM = 1.2;
   const SPREAD_KM      = 0.18;
   const EARTH_R        = 6371.0;
-
   const col   = waitIdx % 4;
   const row   = Math.floor(waitIdx / 4);
   const along = (col - 1.5) * SPREAD_KM;
   const back  = row * SPREAD_KM;
-
-  const dLat = along / EARTH_R * (180 / Math.PI);
-  const dLon = (ANCHOR_DIST_KM + back) / (EARTH_R * Math.cos(portLat * Math.PI / 180)) * (180 / Math.PI);
-
-  return { lat: portLat + dLat, lon: portLon + dLon };
+  const dLat  = along / EARTH_R * (180 / Math.PI);
+  const dLon  = (ANCHOR_DIST_KM + back) / (EARTH_R * Math.cos(portLat * Math.PI / 180)) * (180 / Math.PI);
+  return [portLat + dLat, portLon + dLon];
 }
 
-// ── Berth scheduler ───────────────────────────────────────────────────────────
-/**
- * Pure function — computes the full berth allocation schedule for all ships.
- * Ships are sorted by ETA. Each ship takes the first berth that becomes free.
- * If all berths are full the ship waits (its serviceStart is pushed to when
- * the first berth becomes available).
- *
- * Returns a map: vesselId → BerthEvent
- */
+// ── Constraint-aware berth scheduler ─────────────────────────────────────────
 function scheduleBerths(
   vessels: SimVessel[],
-  numBerths: number,
+  berthProfiles: BerthProfile[],
   portLat: number, portLon: number,
   halts: Record<string, { hours: number; reason: string }>,
 ): Map<string, BerthEvent> {
   const result = new Map<string, BerthEvent>();
-  if (vessels.length === 0 || numBerths === 0) return result;
+  if (vessels.length === 0 || berthProfiles.length === 0) return result;
 
-  // Compute each ship's base ETA
-  interface ShipInfo {
-    v: SimVessel;
-    etaMs: number;
-    unloadMs: number;
-  }
-  const infos: ShipInfo[] = vessels.map(v => {
+  const numBerths = berthProfiles.length;
+
+  // Compute ETA for every vessel
+  const infos = vessels.map(v => {
     const depMs    = new Date(v.departure).getTime();
     const distKm   = haversineKm(v.lat, v.lon, portLat, portLon);
     const speedKmh = Math.max(v.speedKnots, 0.1) * 1.852;
     const travelMs = distKm / speedKmh * 3_600_000;
     const haltMs   = (halts[v.id]?.hours ?? 0) * 3_600_000;
-    return {
-      v,
-      etaMs:    depMs + travelMs + haltMs,
-      unloadMs: v.unloadingHours * 3_600_000,
-    };
+    return { v, etaMs: depMs + travelMs + haltMs, unloadMs: v.unloadingHours * 3_600_000 };
   });
 
   // Sort by ETA ascending
   const sorted = [...infos].sort((a, b) => a.etaMs - b.etaMs);
 
-  // Track when each berth slot becomes free (ms)
-  const berthFreeAt: number[] = Array.from({ length: numBerths }, () => 0);
+  // Track when each berth slot becomes free
+  const berthFreeAt: number[] = Array(numBerths).fill(0);
 
   for (const info of sorted) {
-    // Find the berth that becomes free earliest
-    let bestSlot = 0;
-    let bestFree = berthFreeAt[0];
-    for (let s = 1; s < numBerths; s++) {
-      if (berthFreeAt[s] < bestFree) {
-        bestFree = berthFreeAt[s];
-        bestSlot = s;
+    // Find compatible berths
+    const compatible = berthProfiles
+      .map((bp, slot) => ({ slot, bp }))
+      .filter(({ bp }) => isCompatible(info.v, bp));
+
+    if (compatible.length === 0) {
+      // No compatible berth — record as incompatible, ship waits forever
+      result.set(info.v.id, {
+        vesselId: info.v.id, berthSlot: -1, berthName: 'No compatible berth',
+        serviceStart: info.etaMs, serviceEnd: info.etaMs,
+        compatible: false,
+      });
+      continue;
+    }
+
+    // Among compatible berths, pick the one free earliest
+    let bestSlot = compatible[0].slot;
+    let bestFree = berthFreeAt[compatible[0].slot];
+    for (const { slot } of compatible) {
+      if (berthFreeAt[slot] < bestFree) {
+        bestFree = berthFreeAt[slot];
+        bestSlot = slot;
       }
     }
-    // Ship starts service when BOTH it arrives AND the berth is free
+
     const serviceStart = Math.max(info.etaMs, berthFreeAt[bestSlot]);
     const serviceEnd   = serviceStart + info.unloadMs;
     berthFreeAt[bestSlot] = serviceEnd;
 
     result.set(info.v.id, {
-      vesselId:     info.v.id,
-      berthSlot:    bestSlot,
-      serviceStart,
-      serviceEnd,
+      vesselId: info.v.id,
+      berthSlot: bestSlot,
+      berthName: berthProfiles[bestSlot].name,
+      serviceStart, serviceEnd,
+      compatible: true,
     });
   }
   return result;
+}
+
+// ── Build public schedule table ────────────────────────────────────────────────
+function buildScheduleTable(
+  vessels: SimVessel[],
+  schedule: Map<string, BerthEvent>,
+  portLat: number,
+  portLon: number,
+): ScheduleEntry[] {
+  return vessels
+    .map(v => {
+      const ev = schedule.get(v.id);
+      const depMs    = new Date(v.departure).getTime();
+      const distKm   = haversineKm(v.lat, v.lon, portLat, portLon);
+      const speedKmh = Math.max(v.speedKnots, 0.1) * 1.852;
+      const travelMs = distKm / speedKmh * 3_600_000;
+      const etaMs    = depMs + travelMs;
+      const waitHours = ev?.compatible
+        ? Math.max(0, (ev.serviceStart - etaMs) / 3_600_000)
+        : 0;
+      return {
+        vesselId:     v.id,
+        operator:     v.operator,
+        cargoType:    v.cargoType,
+        weightTonnes: v.loadTonnes,
+        loa:          v.loa,
+        draft:        v.draft,
+        berthName:    ev?.berthName    ?? 'Unscheduled',
+        berthSlot:    ev?.berthSlot    ?? -1,
+        serviceStart: new Date(ev?.serviceStart ?? etaMs),
+        serviceEnd:   new Date(ev?.serviceEnd   ?? etaMs),
+        waitHours,
+        compatible:   ev?.compatible ?? false,
+      };
+    })
+    .sort((a, b) => a.serviceStart.getTime() - b.serviceStart.getTime());
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
@@ -219,40 +289,69 @@ export function useSimulation({
   vessels: SimVessel[];
   numBerths?: number;
 }) {
+  // ── Berth profiles from API ───────────────────────────────────────────────
+  const [berthProfiles, setBerthProfiles] = useState<BerthProfile[]>([]);
+  useEffect(() => {
+    fetch(`${BASE_URL}/berths/limits`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.berths && data.berths.length > 0) {
+          setBerthProfiles(data.berths as BerthProfile[]);
+        }
+      })
+      .catch(() => {});
+  }, []);  // refetched on port change via key from parent
+
+  // Fallback: generic profiles when API not yet loaded
+  const effectiveProfiles = berthProfiles.length > 0
+    ? berthProfiles
+    : Array.from({ length: numBerths }, (_, i) => ({
+        name: `Berth ${i + 1}`,
+        capacity_tonnes: 999_999,
+        max_loa_m: 999,
+        max_draft_m: 99,
+        cargo_types: ['container', 'dry bulk', 'liquid bulk', 'general cargo', 'project cargo'],
+      }));
+
   function getInitialTime(vs: SimVessel[]): Date {
     if (vs.length === 0) return new Date();
     const earliest = Math.min(...vs.map(v => new Date(v.departure).getTime()));
     return new Date(earliest - 10 * 60 * 1000);
   }
 
-  const [simTime,   setSimTime]   = useState<Date>(() => getInitialTime(vessels));
-  const [playing,   setPlaying]   = useState(false);
-  const [speed,     setSpeedState]= useState(1);
-  const [positions, setPositions] = useState<ShipPosition[]>([]);
-  const [berthState, setBerthState] = useState<{
-    slot: number; occupied: boolean; shipId: string | null
-  }[]>([]);
-  const [halts, setHalts] = useState<Record<string, { hours: number; reason: string }>>({});
+  const [simTime,    setSimTime]    = useState<Date>(() => getInitialTime(vessels));
+  const [playing,    setPlaying]    = useState(false);
+  const [speed,      setSpeedState] = useState(1);
+  const [positions,  setPositions]  = useState<ShipPosition[]>([]);
+  const [berthState, setBerthState] = useState<{ slot: number; occupied: boolean; shipId: string | null; berthName: string }[]>([]);
+  const [schedule,   setSchedule]   = useState<ScheduleEntry[]>([]);
+  const [halts,      setHalts]      = useState<Record<string, { hours: number; reason: string }>>({});
 
-  // Refs — no stale closures in tick()
   const rafRef      = useRef<number | null>(null);
   const lastRef     = useRef<number>(performance.now());
   const simRef      = useRef<Date>(simTime);
   const speedRef    = useRef<number>(speed);
   const haltsRef    = useRef(halts);
   const vesselsRef  = useRef(vessels);
+  const profilesRef = useRef(effectiveProfiles);
   const scheduleRef = useRef<Map<string, BerthEvent>>(new Map());
 
-  useEffect(() => { speedRef.current  = speed;   }, [speed]);
-  useEffect(() => { haltsRef.current  = halts;   }, [halts]);
-  useEffect(() => { vesselsRef.current = vessels; }, [vessels]);
+  useEffect(() => { speedRef.current    = speed;            }, [speed]);
+  useEffect(() => { haltsRef.current    = halts;            }, [halts]);
+  useEffect(() => { vesselsRef.current  = vessels;          }, [vessels]);
+  useEffect(() => { profilesRef.current = effectiveProfiles; }, [effectiveProfiles]);
 
-  // Recompute full schedule whenever vessels or halts change
+  // ── Recompute schedule whenever vessels, halts or berth profiles change ────
+  function recompute(vs: SimVessel[], h: typeof halts, profiles: BerthProfile[]) {
+    const map = scheduleBerths(vs, profiles, portLat, portLon, h);
+    scheduleRef.current = map;
+    setSchedule(buildScheduleTable(vs, map, portLat, portLon));
+    return map;
+  }
+
   useEffect(() => {
-    scheduleRef.current = scheduleBerths(
-      vessels, numBerths, portLat, portLon, halts,
-    );
-    // Also reset sim clock to before earliest departure
+    const map = recompute(vessels, halts, effectiveProfiles);
+    // Reset sim clock when vessel count changes
     if (vessels.length > 0) {
       const earliest = Math.min(...vessels.map(v => new Date(v.departure).getTime()));
       const t = new Date(earliest - 10 * 60 * 1000);
@@ -260,97 +359,89 @@ export function useSimulation({
       setSimTime(t);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vessels.length, numBerths, portLat, portLon]);
+  }, [vessels.length, portLat, portLon, berthProfiles.length]);
 
-  // Re-schedule when halts change (ETA changes)
   useEffect(() => {
-    scheduleRef.current = scheduleBerths(
-      vesselsRef.current, numBerths, portLat, portLon, halts,
-    );
+    recompute(vesselsRef.current, halts, profilesRef.current);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [halts]);
 
-  // ── Core interpolator ───────────────────────────────────────────────────────
+  // ── Core position interpolator ─────────────────────────────────────────────
   function interpolate(
     t: Date,
     vs: SimVessel[],
     h: typeof halts,
-    schedule: Map<string, BerthEvent>,
+    sched: Map<string, BerthEvent>,
+    profiles: BerthProfile[],
   ): { positions: ShipPosition[]; berthState: typeof berthState } {
     const tMs = t.getTime();
+    const nbTotal = profiles.length || numBerths;
 
-    // Count how many ships are currently waiting (for anchorage slot assignment)
-    // We process in ETA order so waiting index is stable
-    const sortedIds = vs
-      .map((v, idx) => {
-        const ev = schedule.get(v.id);
-        return { id: v.id, idx, etaMs: ev?.serviceStart ?? 0 };
+    // Sort by scheduled serviceStart for stable anchorage slot assignment
+    const sortedIds = [...vs]
+      .sort((a, b) => {
+        const ea = sched.get(a.id)?.serviceStart ?? 0;
+        const eb = sched.get(b.id)?.serviceStart ?? 0;
+        return ea - eb;
       })
-      .sort((a, b) => a.etaMs - b.etaMs)
-      .map(x => x.id);
+      .map(v => v.id);
 
     let waitingSlot = 0;
 
     const posList: ShipPosition[] = sortedIds.map(id => {
-      const v    = vs.find(x => x.id === id)!;
-      const idx  = vs.indexOf(v);
-      const ev   = schedule.get(v.id);
-      const color = shipColor(idx);
+      const v      = vs.find(x => x.id === id)!;
+      const idx    = vs.indexOf(v);
+      const color  = shipColor(idx);
+      const ev     = sched.get(v.id);
 
-      const depMs   = new Date(v.departure).getTime();
-      const distKm  = haversineKm(v.lat, v.lon, portLat, portLon);
+      const depMs    = new Date(v.departure).getTime();
+      const distKm   = haversineKm(v.lat, v.lon, portLat, portLon);
       const speedKmh = Math.max(v.speedKnots, 0.1) * 1.852;
       const travelMs = distKm / speedKmh * 3_600_000;
       const haltMs   = (h[v.id]?.hours ?? 0) * 3_600_000;
       const rawEtaMs = depMs + travelMs + haltMs;
 
-      // Scheduler may have pushed start later if berth was busy
       const serviceStart = ev?.serviceStart ?? rawEtaMs;
-      const serviceEnd   = ev?.serviceEnd   ?? (serviceStart + v.unloadingHours * 3_600_000);
-      const berthSlot    = ev?.berthSlot    ?? 0;
+      const serviceEnd   = ev?.serviceEnd   ?? (rawEtaMs + v.unloadingHours * 3_600_000);
+      const berthSlot    = ev?.berthSlot    ?? -1;
+      const berthName    = ev?.berthName    ?? 'Unscheduled';
+      const compatible   = ev?.compatible   ?? false;
 
       let lat: number, lon: number;
       let status: ShipPosition['status'];
       let progress: number;
+      let activeBerthSlot = -1;
 
       if (tMs <= depMs) {
-        // Not yet departed — sit at origin
-        ({ lat, lon } = { lat: v.lat, lon: v.lon });
-        status   = 'Approaching';
-        progress = 0;
+        lat = v.lat; lon = v.lon;
+        status = 'Approaching'; progress = 0;
 
       } else if (tMs < rawEtaMs) {
-        // On approach — smooth linear interpolation
         const ratio = Math.min(1, (tMs - depMs) / Math.max(travelMs, 1));
         progress = ratio;
         lat = v.lat + (portLat - v.lat) * ratio;
         lon = v.lon + (portLon - v.lon) * ratio;
         status = h[v.id] ? 'Waiting at Anchorage' : 'Approaching';
 
-      } else if (tMs < serviceStart) {
-        // Arrived but berth is busy — wait at anchorage
-        const aPos = anchorageSlotPos(portLat, portLon, waitingSlot++);
-        lat = aPos.lat; lon = aPos.lon;
-        status   = 'Waiting at Anchorage';
-        progress = 1;
+      } else if (!compatible || tMs < serviceStart) {
+        // Arrived but no compatible berth OR berth not yet free
+        const [aLat, aLon] = anchorageSlotPos(portLat, portLon, waitingSlot++);
+        lat = aLat; lon = aLon;
+        status = 'Waiting at Anchorage'; progress = 1;
 
       } else if (tMs < serviceEnd) {
-        // In berth — servicing
-        const bPos = berthSlotPos(portLat, portLon, berthSlot, numBerths);
-        lat = bPos.lat; lon = bPos.lon;
-        status   = 'Servicing';
-        progress = 1;
+        const [bLat, bLon] = berthSlotPos(portLat, portLon, berthSlot, nbTotal);
+        lat = bLat; lon = bLon;
+        status = 'Servicing'; progress = 1;
+        activeBerthSlot = berthSlot;
 
       } else {
-        // Departed — sail back toward origin
-        const departedMs    = tMs - serviceEnd;
-        const departedHours = departedMs / 3_600_000;
+        const departedHours = (tMs - serviceEnd) / 3_600_000;
         const departDist    = Math.max(v.speedKnots, 0.1) * 1.852 * departedHours;
         const departRatio   = Math.min(departDist / Math.max(distKm, 1), 1);
         lat = portLat + (v.lat - portLat) * departRatio * 0.5;
         lon = portLon + (v.lon - portLon) * departRatio * 0.5;
-        status   = 'Departed';
-        progress = 1;
+        status = 'Departed'; progress = 1;
       }
 
       return {
@@ -364,17 +455,25 @@ export function useSimulation({
         halted: !!h[v.id],
         halt_hours:  h[v.id]?.hours  ?? 0,
         halt_reason: h[v.id]?.reason ?? '',
-        berthSlot: status === 'Servicing' ? berthSlot : -1,
+        berthSlot: activeBerthSlot,
+        berthName,
       };
     });
 
-    // Compute which berth slots are currently occupied
+    // Compute live berthState
     const occupied = new Set<number>();
-    posList.forEach(p => { if (p.status === 'Servicing') occupied.add(p.berthSlot); });
-    const berthSt = Array.from({ length: numBerths }, (_, s) => ({
-      slot: s,
-      occupied: occupied.has(s),
-      shipId: posList.find(p => p.status === 'Servicing' && p.berthSlot === s)?.ship_id ?? null,
+    const berthShipMap = new Map<number, string>();
+    posList.forEach(p => {
+      if (p.status === 'Servicing' && p.berthSlot >= 0) {
+        occupied.add(p.berthSlot);
+        berthShipMap.set(p.berthSlot, p.ship_id);
+      }
+    });
+    const berthSt = profiles.map((bp, s) => ({
+      slot:      s,
+      berthName: bp.name,
+      occupied:  occupied.has(s),
+      shipId:    berthShipMap.get(s) ?? null,
     }));
 
     return { positions: posList, berthState: berthSt };
@@ -395,16 +494,14 @@ export function useSimulation({
       vesselsRef.current,
       haltsRef.current,
       scheduleRef.current,
+      profilesRef.current,
     );
     setSimTime(new Date(nextSim));
     setPositions(result.positions);
     setBerthState(result.berthState);
-
-    rafRef.current = requestAnimationFrame(tick);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [portLat, portLon, numBerths]);
 
-  // Start / stop rAF
   useEffect(() => {
     if (playing) {
       lastRef.current = performance.now();
@@ -415,18 +512,16 @@ export function useSimulation({
     return () => { if (rafRef.current !== null) cancelAnimationFrame(rafRef.current); };
   }, [playing, tick]);
 
-  // Re-render when paused
   useEffect(() => {
     if (!playing) {
-      const r = interpolate(simRef.current, vessels, halts, scheduleRef.current);
+      const r = interpolate(simRef.current, vessels, halts, scheduleRef.current, effectiveProfiles);
       setPositions(r.positions);
       setBerthState(r.berthState);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [halts, vessels, playing]);
+  }, [halts, vessels, playing, berthProfiles]);
 
-  // ── Controls ─────────────────────────────────────────────────────────────────
-  const play  = useCallback(() => { lastRef.current = performance.now(); setPlaying(true);  }, []);
+  const play  = useCallback(() => { lastRef.current = performance.now(); setPlaying(true); }, []);
   const pause = useCallback(() => setPlaying(false), []);
 
   const reset = useCallback(() => {
@@ -437,7 +532,7 @@ export function useSimulation({
       : new Date();
     simRef.current = t;
     setSimTime(t);
-    const r = interpolate(t, vs, haltsRef.current, scheduleRef.current);
+    const r = interpolate(t, vs, haltsRef.current, scheduleRef.current, profilesRef.current);
     setPositions(r.positions);
     setBerthState(r.berthState);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -445,13 +540,11 @@ export function useSimulation({
 
   const setSpeed = useCallback((s: number) => { speedRef.current = s; setSpeedState(s); }, []);
 
-  // ── Emergency halt ────────────────────────────────────────────────────────────
   const applyHalt = useCallback(async (shipId: string, haltHours: number, reason: string) => {
     setHalts(prev => ({ ...prev, [shipId]: { hours: (prev[shipId]?.hours ?? 0) + haltHours, reason } }));
     try {
       await fetch(`${BASE_URL}/vessels/${encodeURIComponent(shipId)}/emergency-halt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ship_id: shipId, halt_hours: haltHours, reason }),
       });
     } catch (e) { console.warn('Backend halt sync failed:', e); }
@@ -466,9 +559,9 @@ export function useSimulation({
 
   return {
     simTime, playing, speed,
-    positions, berthState,
+    positions, berthState, schedule,
     halts, play, pause, reset, setSpeed,
     applyHalt, clearHalt,
-    numBerths,
+    numBerths: effectiveProfiles.length || numBerths,
   };
 }
