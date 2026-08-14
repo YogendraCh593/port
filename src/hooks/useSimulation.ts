@@ -350,8 +350,8 @@ export function useSimulation({
   }
 
   useEffect(() => {
-    const map = recompute(vessels, halts, effectiveProfiles);
-    // Reset sim clock when vessel count changes
+    recompute(vessels, halts, effectiveProfiles);
+    // Reset sim clock when vessels change so ships start from their origin
     if (vessels.length > 0) {
       const earliest = Math.min(...vessels.map(v => new Date(v.departure).getTime()));
       const t = new Date(earliest - 10 * 60 * 1000);
@@ -480,6 +480,7 @@ export function useSimulation({
   }
 
   // ── Stable rAF tick ─────────────────────────────────────────────────────────
+  // Recreated when port coords, numBerths or berth profiles load
   const tick = useCallback(() => {
     const now       = performance.now();
     const realDelta = now - lastRef.current;
@@ -489,18 +490,25 @@ export function useSimulation({
     const nextSim  = new Date(simRef.current.getTime() + simDelta);
     simRef.current = nextSim;
 
+    // Always use latest refs — no stale data
     const result = interpolate(
       nextSim,
       vesselsRef.current,
       haltsRef.current,
       scheduleRef.current,
-      profilesRef.current,
+      profilesRef.current.length > 0 ? profilesRef.current : Array.from({ length: numBerths }, (_, i) => ({
+        name: `Berth ${i + 1}`,
+        capacity_tonnes: 999_999,
+        max_loa_m: 999,
+        max_draft_m: 99,
+        cargo_types: ['container', 'dry bulk', 'liquid bulk', 'general cargo', 'project cargo'],
+      })),
     );
     setSimTime(new Date(nextSim));
     setPositions(result.positions);
     setBerthState(result.berthState);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [portLat, portLon, numBerths]);
+  }, [portLat, portLon, numBerths, berthProfiles.length]);
 
   useEffect(() => {
     if (playing) {
