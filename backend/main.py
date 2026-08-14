@@ -1210,3 +1210,281 @@ def yard_heatmap():
 @app.get("/health")
 def health():
     return {"status": "ok", "vessels": len(_state["ship_details"]), "port": _state["selected_port"]}
+
+
+# ===========================================================================
+# NEW INTERACTIVE FEATURES
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# BAY OF BENGAL / INDIAN OCEAN OCEAN-ONLY COORDINATE VALIDATOR
+# ---------------------------------------------------------------------------
+# Polygon of known land masses to reject. We use a simplified bounding-box
+# approach: coordinates within mainland India or Sri Lanka coastline boxes
+# are flagged as on-land. Ships must be at sea.
+_LAND_BOXES = [
+    # Mainland India (very rough bounding box – east coast excluded to keep
+    # port approaches valid)
+    {"lat_min": 8.0,  "lat_max": 23.5, "lon_min": 72.5, "lon_max": 80.0,  "name": "Mainland India"},
+    # Sri Lanka
+    {"lat_min": 5.9,  "lat_max": 9.9,  "lon_min": 79.6, "lon_max": 81.9,  "name": "Sri Lanka"},
+    # Bangladesh / Myanmar coast
+    {"lat_min": 20.5, "lat_max": 24.0, "lon_min": 88.0, "lon_max": 93.0,  "name": "Bangladesh/Myanmar"},
+    # Andaman Islands (land, not a port approach)
+    {"lat_min": 10.5, "lat_max": 13.7, "lon_min": 92.5, "lon_max": 93.2,  "name": "Andaman Islands"},
+]
+
+# Strict sea window for Bay of Bengal / Indian Ocean east of India
+_SEA_LAT_MIN = -10.0
+_SEA_LAT_MAX =  22.0
+_SEA_LON_MIN =  75.0
+_SEA_LON_MAX = 100.0
+
+def _is_ocean(lat: float, lon: float) -> tuple[bool, str]:
+    """Return (is_valid_ocean, reason_if_invalid)."""
+    if not (_SEA_LAT_MIN <= lat <= _SEA_LAT_MAX and _SEA_LON_MIN <= lon <= _SEA_LON_MAX):
+        return False, f"Outside operating window ({_SEA_LAT_MIN}–{_SEA_LAT_MAX}°N, {_SEA_LON_MIN}–{_SEA_LON_MAX}°E)"
+    for box in _LAND_BOXES:
+        if box["lat_min"] <= lat <= box["lat_max"] and box["lon_min"] <= lon <= box["lon_max"]:
+            return False, f"Coordinate appears to be on land ({box['name']}). Move the position offshore."
+    return True, ""
+
+
+@app.get("/validate/position", summary="Validate lat/lon is in Bay of Bengal / Indian Ocean")
+def validate_position(lat: float, lon: float):
+    valid, reason = _is_ocean(lat, lon)
+    port = _current_port()
+    dist = _haversine_km(lat, lon, port["lat"], port["lon"])
+    return {
+        "valid": valid,
+        "reason": reason,
+        "distance_km": round(dist, 1),
+        "too_close": dist < 5,
+        "lat": lat,
+        "lon": lon,
+    }
+
+
+# ---------------------------------------------------------------------------
+# EMERGENCY HALT
+# ---------------------------------------------------------------------------
+class EmergencyHaltIn(BaseModel):
+    ship_id: str
+    halt_hours: float = 2.0   # How many hours the halt adds to ETA
+    reason: str = "Emergency halt requested by operator"
+
+
+@app.post("/vessels/{ship_id}/emergency-halt", summary="Apply emergency halt to a vessel")
+def emergency_halt(ship_id: str, body: EmergencyHaltIn):
+    """Adds `halt_hours` to the vessel's ETA and unload end time and flags it
+    as halted so the simulation shows the extended waiting time at anchorage."""
+    ship = next((s for s in _state["ship_details"] if s["ship_id"] == ship_id), None)
+    if not ship:
+        raise HTTPException(status_code=404, detail="Vessel not found")
+
+    # Extend ETA and expected end
+    eta_dt = datetime.fromisoformat(ship["eta"])
+    new_eta = eta_dt + timedelta(hours=body.halt_hours)
+    end_dt = datetime.fromisoformat(ship["expected_end"])
+    new_end = end_dt + timedelta(hours=body.halt_hours)
+
+    ship["eta"] = new_eta.isoformat()
+    ship["expected_end"] = new_end.isoformat()
+    ship["halt_hours"] = ship.get("halt_hours", 0.0) + body.halt_hours
+    ship["halt_reason"] = body.reason
+    ship["halted"] = True
+
+    # Invalidate cached optimisation so it re-runs with new ETA
+    _state["optimized"] = False
+
+    return {
+        "ship_id": ship_id,
+        "new_eta": new_eta.isoformat(),
+        "new_expected_end": new_end.isoformat(),
+        "total_halt_hours": ship["halt_hours"],
+        "reason": body.reason,
+    }
+
+
+@app.delete("/vessels/{ship_id}/emergency-halt", summary="Clear emergency halt")
+def clear_halt(ship_id: str):
+    ship = next((s for s in _state["ship_details"] if s["ship_id"] == ship_id), None)
+    if not ship:
+        raise HTTPException(status_code=404, detail="Vessel not found")
+    ship["halted"] = False
+    ship["halt_hours"] = 0.0
+    ship["halt_reason"] = ""
+    _state["optimized"] = False
+    return {"ship_id": ship_id, "cleared": True}
+
+
+# ---------------------------------------------------------------------------
+# SIMULATION POSITION  (1 real hour = 5 sim seconds = speed 720×)
+# ---------------------------------------------------------------------------
+# SIM_SCALE: how many simulation-hours pass per real second at 1× speed.
+# 1 real hour = 5 real seconds  →  1 real second = 3600/5 = 720 sim-seconds
+# The frontend drives the clock but we also expose a server-side interpolation
+# endpoint so other clients (or server-sent events) can consume it.
+
+SIM_SCALE_FACTOR = 720.0   # sim-seconds per real-second at speed=1
+
+@app.get("/simulation/ship-positions", summary="Interpolated ship positions at current sim time")
+def ship_positions_at_simtime():
+    """Returns every ship's interpolated lat/lon at the current sim time.
+    The frontend uses this to drive smooth animation without polling /map/snapshot
+    (which runs the full optimizer every call).
+    """
+    port = _current_port()
+    sim_time = datetime.fromisoformat(_state["simulation_time"])
+    ships = _state["ship_details"]
+
+    def _dt(v: Any) -> datetime:
+        if isinstance(v, datetime): return v
+        if isinstance(v, str): return datetime.fromisoformat(v)
+        return sim_time
+
+    results = []
+    for idx, ship in enumerate(ships):
+        start = _dt(ship.get("start_dt") or ship.get("updated_at") or sim_time)
+        eta   = _dt(ship.get("eta") or start)
+        lat0, lon0 = float(ship["latitude"]), float(ship["longitude"])
+
+        if sim_time <= start:
+            lat, lon = lat0, lon0
+            status = "Approaching"
+        elif sim_time >= eta:
+            lat, lon = port["lat"], port["lon"]
+            status = "At Port"
+        else:
+            total  = max((eta - start).total_seconds(), 1.0)
+            elapsed = (sim_time - start).total_seconds()
+            ratio  = min(1.0, elapsed / total)
+            lat = lat0 + (port["lat"] - lat0) * ratio
+            lon = lon0 + (port["lon"] - lon0) * ratio
+            status = "Approaching"
+
+        # Validate the interpolated position stays at sea
+        ok, _ = _is_ocean(lat, lon)
+        if not ok:
+            # Snap to port vicinity if somehow on land
+            lat, lon = port["lat"], port["lon"]
+
+        results.append({
+            "ship_id": ship["ship_id"],
+            "lat": lat,
+            "lon": lon,
+            "status": status,
+            "halted": ship.get("halted", False),
+            "halt_hours": ship.get("halt_hours", 0.0),
+            "halt_reason": ship.get("halt_reason", ""),
+            "speed_knots": ship.get("speed_knots", 0),
+            "eta": ship.get("eta"),
+            "color": _ship_color(idx),
+            "index": idx,
+            "cargo_type": ship.get("cargo_type"),
+            "weight_tonnes": ship.get("weight_tonnes"),
+            "operator": ship.get("operator"),
+            "loa_m": ship.get("loa_m"),
+            "draft_m": ship.get("draft_m"),
+        })
+
+    return {"simulation_time": _state["simulation_time"], "ships": results, "scale_factor": SIM_SCALE_FACTOR}
+
+
+# ---------------------------------------------------------------------------
+# BERTH LOAD CAPACITY CHECK
+# ---------------------------------------------------------------------------
+@app.get("/berths/capacity-check", summary="Check if a vessel fits within berth load capacity")
+def berth_capacity_check(weight_tonnes: float, loa_m: float, draft_m: float, cargo_type: str = "general cargo"):
+    """Returns which berths can accept this vessel considering load, dimensions
+    and cargo type. Used by the registration console for live feedback."""
+    port = _current_port()
+    results = []
+    for name, profile in port["berth_profiles"].items():
+        reasons = _berth_compat(
+            {"weight_tonnes": weight_tonnes, "loa_m": loa_m, "draft_m": draft_m, "cargo_type": cargo_type},
+            profile,
+        )
+        load_pct = round(weight_tonnes / max(profile["capacity_tonnes"], 1) * 100, 1)
+        results.append({
+            "berth": name,
+            "compatible": len(reasons) == 0,
+            "reasons": reasons,
+            "berth_capacity_t": profile["capacity_tonnes"],
+            "load_pct": load_pct,
+            "max_loa_m": profile["max_loa_m"],
+            "max_draft_m": profile["max_draft_m"],
+            "cargo_types": profile["cargo_types"],
+        })
+    compatible = [r for r in results if r["compatible"]]
+    return {
+        "compatible_berths": compatible,
+        "incompatible_berths": [r for r in results if not r["compatible"]],
+        "any_compatible": len(compatible) > 0,
+        "best_berth": compatible[0]["berth"] if compatible else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CRANE LOAD OPTIMIZATION
+# ---------------------------------------------------------------------------
+@app.post("/cranes/optimize", summary="Optimize crane assignment by berth load capacity")
+def optimize_cranes():
+    """Assigns cranes to berths/ships to maximize throughput.
+    Priority order:
+      1. Spoilable cargo with nearest deadline
+      2. Heaviest load (maximize crane throughput)
+      3. Berth with most remaining capacity to handle overflow
+    Returns a detailed per-crane schedule with load balancing metrics.
+    """
+    port = _current_port()
+    cs = _state["crane_settings"]
+    ships = _state["ship_details"]
+
+    if not ships:
+        return {"assignments": [], "utilization": [], "total_load_t": 0, "balanced": True}
+
+    opt = _optimize(ships, port, cs["cranes"], cs["rate_tph"])
+    crane_schedule = opt["crane_schedule"]
+
+    # Build crane utilization summary
+    crane_count = cs["cranes"]
+    crane_loads: Dict[str, float] = {}
+    for row in crane_schedule:
+        c = row["crane"]
+        crane_loads[c] = crane_loads.get(c, 0.0) + float(row["weight_tonnes"])
+
+    total_load = sum(crane_loads.values())
+    ideal_per_crane = total_load / max(crane_count, 1)
+
+    utilization = []
+    for i in range(crane_count):
+        cname = f"Crane {i+1}"
+        load = crane_loads.get(cname, 0.0)
+        pct = round(load / max(float(cs["rate_tph"]), 1) * 100, 1)
+        utilization.append({
+            "crane": cname,
+            "assigned_load_t": round(load, 1),
+            "utilization_pct": min(pct, 100),
+            "deviation_from_ideal_t": round(load - ideal_per_crane, 1),
+        })
+
+    # Balance score: 100 = perfectly balanced, lower = more imbalanced
+    if total_load > 0 and crane_count > 1:
+        loads = [u["assigned_load_t"] for u in utilization]
+        mean_load = total_load / crane_count
+        variance = sum((l - mean_load) ** 2 for l in loads) / crane_count
+        balance_score = max(0, round(100 - (variance ** 0.5 / max(mean_load, 1)) * 100, 1))
+    else:
+        balance_score = 100.0
+
+    return {
+        "assignments": crane_schedule,
+        "utilization": utilization,
+        "total_load_t": round(total_load, 1),
+        "ideal_per_crane_t": round(ideal_per_crane, 1),
+        "balance_score": balance_score,
+        "balanced": balance_score >= 75,
+        "crane_count": crane_count,
+        "rate_tph": cs["rate_tph"],
+    }

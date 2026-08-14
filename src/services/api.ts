@@ -5,7 +5,8 @@
 
 // In production (Vercel), set VITE_API_URL to your Railway backend URL.
 // Locally it defaults to localhost:8000.
-export const BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const BASE_URL: string = (import.meta as any).env?.VITE_API_URL ?? 'http://localhost:8000';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
