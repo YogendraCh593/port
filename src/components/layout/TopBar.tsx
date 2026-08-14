@@ -17,13 +17,15 @@ interface TopBarProps {
 }
 
 export function TopBar({ onOpenNav }: TopBarProps) {
-  const { vessels, alerts, now, settings, playing, speed } = usePort();
+  const { vessels, alerts, now, settings, playing, speed, activePort } = usePort();
 
-  const active = vessels.filter((v) => v.status !== 'departing').length;
+  const active  = vessels.length;
   const waiting = vessels.filter((v) => v.status === 'waiting').length;
   const openAlerts = alerts.filter(
     (a) => !a.acknowledged && (a.severity === 'critical' || a.severity === 'warning')
   ).length;
+
+  const portLabel = activePort?.short ?? settings.portName;
 
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-line bg-abyss/90 px-3 backdrop-blur-xl sm:px-4">
@@ -38,7 +40,7 @@ export function TopBar({ onOpenNav }: TopBarProps) {
 
       <div className="min-w-0">
         <p className="truncate font-display text-xs font-bold tracking-wider2 text-chalk">
-          {settings.portName}
+          {portLabel}
         </p>
         <p className="flex items-center gap-1.5 font-mono text-[10px] text-ok">
           <StatusDot color="bg-ok" />

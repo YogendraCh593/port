@@ -40,10 +40,10 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProps) {
-  const { alerts, optimization, solving } = usePort();
+  const { alerts, optimization, solving, activePort, vessels } = usePort();
   const openCritical = alerts.filter((a) => a.severity === 'critical' && !a.acknowledged).length;
-
   const systemStatus = openCritical > 0 ? 'DEGRADED' : 'OPTIMAL';
+  const portLabel = activePort?.short ?? 'PORT';
 
   return (
     <div
@@ -60,8 +60,8 @@ export function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProps) {
         {!collapsed &&
         <div className="min-w-0">
             <p className="font-display text-sm font-bold tracking-wider2 text-chalk">NEXUSPORT</p>
-            <p className="truncate font-display text-[9px] font-semibold uppercase tracking-wider2 text-mist">
-              Intelligent Maritime Operations
+            <p className="truncate font-display text-[9px] font-semibold uppercase tracking-wider2 text-aqua">
+              {portLabel}
             </p>
           </div>
         }
@@ -110,13 +110,12 @@ export function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProps) {
         {!collapsed ?
         <dl className="space-y-2">
             <SystemRow label="System Status" value={systemStatus} tone={openCritical ? 'text-warn' : 'text-ok'} dot={openCritical ? 'bg-warn' : 'bg-ok'} />
-            <SystemRow label="Database" value="CONNECTED" tone="text-ok" dot="bg-ok" />
+            <SystemRow label="Vessels" value={`${vessels.length} REG.`} tone="text-aqua" dot="bg-aqua" />
             <SystemRow
-            label="Optimization Engine"
+            label="Optimizer"
             value={solving ? 'SOLVING' : optimization ? 'READY' : 'IDLE'}
             tone={solving ? 'text-quantum' : 'text-ok'}
             dot={solving ? 'bg-quantum' : 'bg-ok'} />
-          
           </dl> :
 
         <div className="flex flex-col items-center gap-2.5 py-1">

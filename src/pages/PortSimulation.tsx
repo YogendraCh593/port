@@ -15,8 +15,7 @@ import React, { useMemo, useState } from 'react';
 import {
   PlayIcon, PauseIcon, RotateCcwIcon, GaugeIcon,
   AnchorIcon, AlertOctagonIcon, XCircleIcon,
-  ChevronLeftIcon, ChevronRightIcon, ConstructionIcon,
-  ShipIcon, ZapIcon,
+  ConstructionIcon, ShipIcon, ZapIcon, TimerIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { PageHeader } from '../components/ui/PageHeader';
@@ -28,7 +27,7 @@ import { KpiCard } from '../components/ui/KpiCard';
 import { PortMap } from '../components/map/PortMap';
 import { usePort } from '../contexts/PortContext';
 import { useSimulation, SIM_SCALE } from '../hooks/useSimulation';
-import { fmtClock, fmtDate, fmtNumber } from '../utils/geo';
+import { fmtClock, fmtDate, fmtDuration, fmtNumber } from '../utils/geo';
 import { cn, inputClass } from '../utils/ui';
 
 const SPEEDS = [1, 10, 30, 100, 720];
@@ -80,13 +79,6 @@ export function PortSimulation() {
   const [haltTarget, setHaltTarget] = useState<string | null>(null);
   const [haltHours, setHaltHours] = useState(2);
   const [haltReason, setHaltReason] = useState('Emergency halt requested');
-
-  // Advance/rewind simulation time by adding to a virtual offset
-  function advanceSimTime(minutes: number) {
-    // We can't directly jump simTime from outside the hook, so we call reset
-    // and adjust speed; simplest UX is just to show a toast
-    toast(`Clock advanced ${minutes > 0 ? '+' : ''}${minutes} min (use speed controls for continuous advance)`);
-  }
 
   return (
     <>
@@ -223,11 +215,34 @@ export function PortSimulation() {
                     <ProgressBar value={ship.progress * 100} tone="bg-aqua" className="mt-1.5" />
                     <p className="mt-1 font-mono text-[10px] text-mist">
                       {ship.cargo_type} · {fmtNumber(ship.weight_tonnes)} t
+                      {ship.eta && (
+                        <span className="ml-2 text-chalk">
+                          ETA {new Date(ship.eta).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
                     </p>
                   </li>
                 ))}
             </ul>
           </Panel>
+
+          {/* Waiting at anchorage */}
+          {counters.waiting > 0 && (
+            <Panel eyebrow={`${counters.waiting} waiting`} title="At Anchorage" bodyClassName="p-0">
+              <ul className="divide-y divide-line/70">
+                {positions.filter(p => p.status === 'Waiting at Anchorage').map(ship => (
+                  <li key={ship.ship_id} className="flex items-center gap-3 px-4 py-2.5 bg-warn/[0.03]">
+                    <span className="h-2 w-2 rounded-full bg-warn shrink-0" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-mono text-[12px] font-bold text-chalk">{ship.ship_id}</span>
+                      <span className="block font-mono text-[10px] text-mist">{ship.operator} · {ship.cargo_type}</span>
+                    </span>
+                    <span className="font-mono text-[10px] text-warn">WAITING</span>
+                  </li>
+                ))}
+              </ul>
+            </Panel>
+          )}
 
           {/* Halted vessels */}
           {counters.halted > 0 && (
