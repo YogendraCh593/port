@@ -160,63 +160,45 @@ export function BerthOptimization() {
         </Panel>
       )}
 
-      {/* Berth envelope */}
-      <Panel
-        eyebrow="Estate"
-        title="Berth Envelope"
-        className="mt-3"
-        bodyClassName="p-0"
-      >
+      {/* Berth envelope — now uses backend schedule when available */}
+      <Panel eyebrow="Estate" title="Berth Envelope" className="mt-3" bodyClassName="p-0">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[640px] text-left">
             <thead>
               <tr className="border-b border-line/70 bg-abyss/40">
-                {['Berth', 'Max LOA', 'Max Draft', 'Crane Slots', 'Scheduled', 'Occupancy', 'Status'].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      scope="col"
-                      className="px-4 py-2.5 font-display text-[9px] font-semibold uppercase tracking-wider2 text-mist"
-                    >
-                      {h}
-                    </th>
-                  ),
-                )}
+                {['Berth', 'Max LOA', 'Max Draft', 'Crane Slots', 'Scheduled Ship', 'Wait (h)', 'Status'].map(h => (
+                  <th key={h} scope="col"
+                    className="px-4 py-2.5 font-display text-[9px] font-semibold uppercase tracking-wider2 text-mist">
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {berths.map((berth) => {
-                const rows =
-                  optimization?.assignments.filter((a) => a.berthId === berth.id) ?? [];
-                const hours = rows.reduce(
-                  (s, a) =>
-                    s + (new Date(a.end).getTime() - new Date(a.start).getTime()) / 3_600_000,
-                  0,
-                );
+              {berths.map(berth => {
+                // Try backend schedule first, fall back to local assignments
+                const backendRow = berthSchedule?.find((r: any) => r.berth === berth.id || r.berth === berth.name);
+                const localRows  = optimization?.assignments.filter(a => a.berthId === berth.id) ?? [];
+                const scheduled  = backendRow ? backendRow.ship_id : localRows.map(r => r.vesselId).join(', ') || '—';
+                const waitH      = backendRow ? Number(backendRow.berth_wait_hours ?? 0) : localRows.reduce((s, a) => s + a.waitingHours, 0);
                 return (
                   <tr key={berth.id} className="border-b border-line/50">
                     <td className="px-4 py-2.5 font-mono text-[12px] text-chalk">{berth.name}</td>
                     <td className="px-4 py-2.5 font-mono text-[11px] text-mist">{berth.maxLoa} m</td>
                     <td className="px-4 py-2.5 font-mono text-[11px] text-mist">{berth.maxDraft} m</td>
                     <td className="px-4 py-2.5 font-mono text-[11px] text-mist">{berth.craneSlots}</td>
-                    <td className="px-4 py-2.5 font-mono text-[11px] text-aqua">
-                      {rows.length ? rows.map((r) => r.vesselId).join(', ') : '—'}
-                    </td>
-                    <td className="px-4 py-2.5 font-mono text-[11px] text-chalk">
-                      {fmtNumber(hours, 1)} h
+                    <td className="px-4 py-2.5 font-mono text-[11px] text-aqua">{scheduled}</td>
+                    <td className="px-4 py-2.5 font-mono text-[11px]">
+                      <span className={waitH > 0.5 ? 'text-warn' : 'text-mist'}>
+                        {waitH.toFixed(1)} h
+                      </span>
                     </td>
                     <td className="px-4 py-2.5">
-                      <span
-                        className={cn(
-                          'inline-flex items-center gap-1.5 font-mono text-[10px]',
-                          berth.status === 'operational' ? 'text-ok' : 'text-mist',
-                        )}
-                      >
-                        {berth.status === 'operational' ? (
-                          <CheckCircle2Icon className="h-3 w-3" aria-hidden />
-                        ) : (
-                          <TimerIcon className="h-3 w-3" aria-hidden />
-                        )}
+                      <span className={cn('inline-flex items-center gap-1.5 font-mono text-[10px]',
+                        berth.status === 'operational' ? 'text-ok' : 'text-mist')}>
+                        {berth.status === 'operational'
+                          ? <CheckCircle2Icon className="h-3 w-3" aria-hidden />
+                          : <TimerIcon className="h-3 w-3" aria-hidden />}
                         {berth.status.toUpperCase()}
                       </span>
                     </td>
