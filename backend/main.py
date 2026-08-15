@@ -1525,3 +1525,224 @@ def berth_limits():
         "berth_count":    len(berth_summary),
         "berths":         berth_summary,
     }
+
+
+# ===========================================================================
+# DYNAMIC HYBRID OPTIMIZATION ENGINE  (new endpoints)
+# ===========================================================================
+from optimizer import (
+    engine as _engine,
+    calc_processing_time_min,
+    evaluate_preemption,
+    ObjectiveWeights,
+    DEFAULT_CRANE_RATE_TPM,
+    DEFAULT_EFFICIENCY,
+    DEFAULT_SWITCH_COST_MIN,
+    DEFAULT_AGING_RATE,
+    schedule_fcfs, schedule_sjf, schedule_srpt, schedule_greedy,
+    schedule_qaoa, schedule_hybrid,
+    compute_objective,
+)
+
+# ── Pydantic models ──────────────────────────────────────────────────────────
+
+class OptConfigIn(BaseModel):
+    algo:           str   = "Hybrid"
+    crane_rate_tpm: float = DEFAULT_CRANE_RATE_TPM
+    efficiency:     float = DEFAULT_EFFICIENCY
+    switch_cost:    float = DEFAULT_SWITCH_COST_MIN
+    aging_rate:     float = DEFAULT_AGING_RATE
+    preemption:     bool  = True
+    rolling:        bool  = True
+    qaoa_enabled:   bool  = True
+    crane_count:    int   = 4
+
+class PreemptCheckIn(BaseModel):
+    current_ship_id: str
+    new_ship_id:     str
+
+class UpdateCargoIn(BaseModel):
+    ship_id:       str
+    sim_time_ms:   float
+
+class HaltEventIn(BaseModel):
+    ship_id:     str
+    halt_hours:  float = 2.0
+
+
+# ── Sync engine with registration state ─────────────────────────────────────
+
+def _sync_engine():
+    """Push current _state ship_details into the rolling engine."""
+    port = _current_port()
+    _engine.load_ships(_state["ship_details"], port["berth_profiles"])
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+@app.get("/optimization/config", summary="Get current optimizer configuration")
+def get_opt_config():
+    return _engine.opt_config
+
+
+@app.put("/optimization/config", summary="Update optimizer configuration")
+def set_opt_config(body: OptConfigIn):
+    _engine.configure(body.model_dump())
+    return _engine.opt_config
+
+
+@app.post("/optimization/run", summary="Run the full optimization pipeline")
+def run_optimization_pipeline():
+    """
+    Syncs ship/berth state from the registration system, then runs the
+    selected optimizer (FCFS/SJF/SRPT/Greedy/QAOA/Hybrid).
+    Returns the optimized schedule with 'why' explanations per ship.
+    """
+    _sync_engine()
+    meta = _engine.optimize()
+    return {"meta": meta, "schedule": _engine.schedule, "event_log": _engine.event_log[-20:]}
+
+
+@app.get("/optimization/live-state", summary="Get full live port state")
+def get_live_state():
+    """
+    Returns ships, berths, cranes, schedule, event log and optimizer metadata.
+    Used by the dashboard to display live optimization state.
+    """
+    return _engine.get_live_state()
+
+
+@app.post("/optimization/compare-algorithms", summary="Compare all scheduling algorithms on current scenario")
+def compare_algorithms():
+    """
+    Runs FCFS, SJF, SRPT, Greedy, QAOA, and Hybrid on the same scenario.
+    Returns a comparison table with objective values and key metrics.
+    """
+    _sync_engine()
+    port = _current_port()
+    ships = list(_engine.ship_states.values()) or _state["ship_details"]
+    berths_list = [
+        {
+            "name":             bname,
+            "capacity_tonnes":  bp["capacity_tonnes"],
+            "max_loa_m":        bp["max_loa_m"],
+            "max_draft_m":      bp["max_draft_m"],
+        }
+        for bname, bp in port["berth_profiles"].items()
+    ]
+    crane_count = int(_engine.opt_config.get("crane_count", 4))
+    comparison  = _engine.compare_all_algorithms(ships, berths_list, crane_count)
+    return {
+        "comparison":   comparison,
+        "scenario":     {
+            "ships":        len(ships),
+            "berths":       len(berths_list),
+            "cranes":       crane_count,
+            "algo_used":    _engine.opt_config.get("algo", "Hybrid"),
+        },
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+@app.post("/optimization/preemption-check", summary="Evaluate whether crane preemption is beneficial")
+def preemption_check(body: PreemptCheckIn):
+    """
+    Evaluates whether preempting the current ship to serve a new ship
+    improves the global schedule objective.
+    """
+    _sync_engine()
+    current = _engine.ship_states.get(body.current_ship_id)
+    new_s   = _engine.ship_states.get(body.new_ship_id)
+    if not current or not new_s:
+        raise HTTPException(status_code=404, detail="Ship not found in engine state")
+    w = ObjectiveWeights()
+    should_preempt, reason = evaluate_preemption(
+        current, new_s,
+        float(_engine.opt_config["switch_cost"]),
+        float(_engine.opt_config["crane_rate_tpm"]),
+        float(_engine.opt_config["efficiency"]),
+        w,
+    )
+    return {
+        "current_ship": body.current_ship_id,
+        "new_ship":     body.new_ship_id,
+        "preempt":      should_preempt,
+        "reason":       reason,
+    }
+
+
+@app.post("/optimization/update-cargo", summary="Update remaining cargo for a ship (live sim tick)")
+def update_cargo(body: UpdateCargoIn):
+    _engine.update_cargo(body.ship_id, body.sim_time_ms)
+    ship = _engine.ship_states.get(body.ship_id)
+    if not ship:
+        raise HTTPException(status_code=404, detail="Ship not found")
+    return {
+        "ship_id":            body.ship_id,
+        "remaining_cargo_t":  ship.get("remaining_cargo_t"),
+        "processed_cargo_t":  ship.get("processed_cargo_t"),
+        "predicted_departure": ship.get("predicted_departure"),
+    }
+
+
+@app.post("/optimization/event/arrival", summary="Notify engine of ship arrival")
+def event_arrival(body: dict):
+    ship_id = body.get("ship_id")
+    if not ship_id:
+        raise HTTPException(status_code=422, detail="ship_id required")
+    _engine.on_ship_arrival(ship_id)
+    return {"ok": True, "event_log": _engine.event_log[-5:]}
+
+
+@app.post("/optimization/event/berth-free", summary="Notify engine that a berth has become available")
+def event_berth_free(body: dict):
+    berth_id = body.get("berth_id")
+    if not berth_id:
+        raise HTTPException(status_code=422, detail="berth_id required")
+    _engine.on_berth_free(berth_id)
+    return {"ok": True, "event_log": _engine.event_log[-5:]}
+
+
+@app.post("/optimization/event/halt", summary="Notify engine of emergency halt")
+def event_halt(body: HaltEventIn):
+    _engine.on_emergency_halt(body.ship_id, body.halt_hours)
+    return {"ok": True, "event_log": _engine.event_log[-5:]}
+
+
+@app.post("/optimization/event/halt-cleared", summary="Notify engine that halt was cleared")
+def event_halt_cleared(body: dict):
+    ship_id = body.get("ship_id")
+    if not ship_id:
+        raise HTTPException(status_code=422, detail="ship_id required")
+    _engine.on_halt_cleared(ship_id)
+    return {"ok": True, "event_log": _engine.event_log[-5:]}
+
+
+@app.get("/optimization/event-log", summary="Get the full event log")
+def get_event_log(limit: int = 100):
+    return {"events": _engine.event_log[-limit:]}
+
+
+@app.get("/optimization/processing-time", summary="Calculate dynamic processing time for given cargo and cranes")
+def get_processing_time(
+    cargo_tonnes:  float = 1000.0,
+    crane_count:   int   = 1,
+    rate_tpm:      float = DEFAULT_CRANE_RATE_TPM,
+    efficiency:    float = DEFAULT_EFFICIENCY,
+):
+    proc_min = calc_processing_time_min(cargo_tonnes, crane_count, rate_tpm, efficiency)
+    return {
+        "cargo_tonnes":         cargo_tonnes,
+        "crane_count":          crane_count,
+        "rate_tpm":             rate_tpm,
+        "efficiency":           efficiency,
+        "effective_rate_tpm":   round(rate_tpm * crane_count * efficiency, 3),
+        "processing_time_min":  round(proc_min, 2),
+        "processing_time_hrs":  round(proc_min / 60, 3),
+    }
+
+
+@app.post("/optimization/reset", summary="Reset the rolling-horizon engine")
+def reset_engine():
+    _engine.reset()
+    return {"ok": True, "message": "Rolling horizon engine reset"}
